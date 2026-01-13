@@ -1,10 +1,13 @@
+/* ======================
+   PART 1 : Import & App
+====================== */
 const express = require('express');
 const line = require('@line/bot-sdk');
 
 const app = express();
 
 /* ======================
-   LINE config
+   PART 2 : LINE Config
 ====================== */
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
@@ -14,7 +17,21 @@ const config = {
 const client = new line.Client(config);
 
 /* ======================
-   Log ทุก request (debug)
+   PART 3 : In-memory state
+   (จำว่าคนไหนกำลัง check-in)
+====================== */
+const pendingCheckin = {};
+
+/* ======================
+   PART 4 : Helper function
+====================== */
+function isSunday() {
+  const today = new Date();
+  return today.getDay() === 0; // Sunday
+}
+
+/* ======================
+   PART 5 : Debug log
 ====================== */
 app.use((req, res, next) => {
   console.log('➡️ incoming:', req.method, req.url);
@@ -22,21 +39,18 @@ app.use((req, res, next) => {
 });
 
 /* ======================
-   Root (ไว้ปลุก Render)
+   PART 6 : Root & Health
 ====================== */
 app.get('/', (req, res) => {
-  res.status(200).send('LINE Bot is running 🚀');
+  res.send('LINE Bot is running 🚀');
 });
 
-/* ======================
-   Health check (UptimeRobot)
-====================== */
 app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+  res.send('OK');
 });
 
 /* ======================
-   LINE Webhook
+   PART 7 : LINE Webhook
 ====================== */
 app.post(
   '/webhook',
@@ -46,12 +60,106 @@ app.post(
       const events = req.body.events;
 
       for (const event of events) {
-        if (event.type === 'message' && event.message.type === 'text') {
+        if (event.type !== 'message') continue;
+        if (event.message.type !== 'text') continue;
+
+        const userId = event.source.userId;
+        const text = event.message.text.trim().toLowerCase();
+
+        /* ===== START CHECK-IN ===== */
+        if (text === 'checkin') {
+          if (isSunday()) {
+            await client.replyMessage(event.replyToken, {
+              type: 'text',
+              text: '❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ',
+            });
+            continue;
+          }
+
+          if (pendingCheckin[userId]) {
+            await client.replyMessage(event.replyToken, {
+              type: 'text',
+              text: '⚠️ คุณได้ทำการ check-in ไปแล้วค่ะ',
+            });
+            continue;
+          }
+
+          pendingCheckin[userId] = true;
+
           await client.replyMessage(event.replyToken, {
             type: 'text',
-            text: `คุณพิมพ์ว่า: ${event.message.text}`,
+            text: 'วันนี้คุณทำงานแบบไหน?',
+            quickReply: {
+              items: [
+                {
+                  type: 'action',
+                  action: {
+                    type: 'message',
+                    label: '✅ เต็มวัน',
+                    text: 'work_full',
+                  },
+                },
+                {
+                  type: 'action',
+                  action: {
+                    type: 'message',
+                    label: '🌤 ครึ่งวันเช้า',
+                    text: 'work_morning',
+                  },
+                },
+                {
+                  type: 'action',
+                  action: {
+                    type: 'message',
+                    label: '🌙 ครึ่งวันบ่าย',
+                    text: 'work_afternoon',
+                  },
+                },
+                {
+                  type: 'action',
+                  action: {
+                    type: 'message',
+                    label: '❌ หยุดงาน',
+                    text: 'work_off',
+                  },
+                },
+              ],
+            },
           });
+          continue;
         }
+
+        /* ===== RECEIVE WORK TYPE ===== */
+        if (pendingCheckin[userId]) {
+          let workType = null;
+
+          if (text === 'work_full') workType = 'เต็มวัน';
+          if (text === 'work_morning') workType = 'ครึ่งวันเช้า';
+          if (text === 'work_afternoon') workType = 'ครึ่งวันบ่าย';
+          if (text === 'work_off') workType = 'หยุดงาน';
+
+          if (!workType) {
+            await client.replyMessage(event.replyToken, {
+              type: 'text',
+              text: '⚠️ กรุณาเลือกจากปุ่มเท่านั้นค่ะ',
+            });
+            continue;
+          }
+
+          delete pendingCheckin[userId];
+
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: `✅ บันทึกการทำงาน: ${workType} เรียบร้อยแล้ว`,
+          });
+          continue;
+        }
+
+        /* ===== DEFAULT ===== */
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: 'พิมพ์คำว่า "checkin" เพื่อเริ่มลงเวลาทำงานค่ะ',
+        });
       }
 
       res.sendStatus(200);
@@ -63,7 +171,7 @@ app.post(
 );
 
 /* ======================
-   Start server
+   PART 8 : Start Server
 ====================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
