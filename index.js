@@ -1,5 +1,6 @@
 const express = require('express');
 const line = require('@line/bot-sdk');
+const cron = require('node-cron'); // ✅ เพิ่ม cron
 
 const app = express();
 
@@ -43,6 +44,58 @@ function formatThaiDate() {
   ];
   return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()+543}`;
 }
+
+function hasNotCheckedInToday(userId, today) {
+  return !checkinStore[userId] || checkinStore[userId].date !== today;
+}
+
+/* ======================
+   🔔 Auto Reminder
+====================== */
+
+// ⏰ 09:00 เตือนครั้งแรก
+cron.schedule('0 9 * * *', async () => {
+  if (isSunday()) return;
+
+  const today = getToday();
+  const thaiDate = formatThaiDate();
+
+  for (const userId in checkinStore) {
+    if (hasNotCheckedInToday(userId, today)) {
+      try {
+        const profile = await client.getProfile(userId);
+        await client.pushMessage(userId, {
+          type: 'text',
+          text: `⏰ แจ้งเตือน 09:00\n${thaiDate}\n${profile.displayName} อย่าลืม check-in นะคะ`,
+        });
+      } catch (err) {
+        console.error('09:00 reminder error:', err);
+      }
+    }
+  }
+}, { timezone: 'Asia/Bangkok' });
+
+// ⚠️ 09:20 เตือนครั้งสุดท้าย
+cron.schedule('20 9 * * *', async () => {
+  if (isSunday()) return;
+
+  const today = getToday();
+  const thaiDate = formatThaiDate();
+
+  for (const userId in checkinStore) {
+    if (hasNotCheckedInToday(userId, today)) {
+      try {
+        const profile = await client.getProfile(userId);
+        await client.pushMessage(userId, {
+          type: 'text',
+          text: `⚠️ แจ้งเตือนครั้งสุดท้าย (09:20)\n${thaiDate}\n${profile.displayName}\nระบบจะปิด check-in เวลา 09:30`,
+        });
+      } catch (err) {
+        console.error('09:20 reminder error:', err);
+      }
+    }
+  }
+}, { timezone: 'Asia/Bangkok' });
 
 /* ======================
    Root + Health
@@ -88,7 +141,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         if (checkinStore[userId]?.date === today) {
           await client.replyMessage(event.replyToken, {
             type: 'text',
-            text: `⚠️ ${name} วันนี้คุณบันทึกไปแล้ว\nไม่สามารถแก้ไขได้ค่ะ`,
+            text: `⚠️ ${name} วันนี้คุณบันทึกไปแล้ว`,
           });
           continue;
         }
@@ -107,6 +160,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
             ],
           },
         });
+        continue;
       }
 
       /* ===== รับคำตอบ ===== */
@@ -135,10 +189,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           'work:off': 'หยุดงาน',
         };
 
-        checkinStore[userId] = {
-          date: today,
-          workType: text,
-        };
+        checkinStore[userId] = { date: today, workType: text };
 
         await client.replyMessage(event.replyToken, {
           type: 'text',
