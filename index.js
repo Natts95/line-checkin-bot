@@ -98,6 +98,69 @@ cron.schedule('20 9 * * *', async () => {
 }, { timezone: 'Asia/Bangkok' });
 
 /* ======================
+   📊 Daily Summary (09:45)
+   ส่งเฉพาะเจ้าของ
+====================== */
+cron.schedule('45 9 * * *', async () => {
+  if (isSunday()) return;
+
+  const today = getToday();
+  const thaiDate = formatThaiDate();
+  const adminId = process.env.ADMIN_USER_ID;
+
+  if (!adminId) {
+    console.error('❌ ADMIN_USER_ID not set');
+    return;
+  }
+
+  let checkedIn = [];
+  let notCheckedIn = [];
+
+  for (const userId in checkinStore) {
+    try {
+      const profile = await client.getProfile(userId);
+      const name = profile.displayName;
+
+      if (checkinStore[userId].date === today) {
+        const typeMap = {
+          'work:full': 'เต็มวัน',
+          'work:half-morning': 'ครึ่งวันเช้า',
+          'work:half-afternoon': 'ครึ่งวันบ่าย',
+          'work:off': 'หยุดงาน',
+        };
+
+        checkedIn.push(
+          `• ${name} (${typeMap[checkinStore[userId].workType]})`
+        );
+      } else {
+        notCheckedIn.push(`• ${name}`);
+      }
+    } catch (err) {
+      console.error('Profile error:', err);
+    }
+  }
+
+  let message = `📊 สรุปการทำงานประจำวัน\n${thaiDate}\n\n`;
+
+  message += `✅ check-in แล้ว (${checkedIn.length})\n`;
+  message += checkedIn.length ? checkedIn.join('\n') : '- ไม่มี -';
+
+  message += `\n\n❌ ไม่ได้ check-in (${notCheckedIn.length})\n`;
+  message += notCheckedIn.length ? notCheckedIn.join('\n') : '- ไม่มี -';
+
+  try {
+    await client.pushMessage(adminId, {
+      type: 'text',
+      text: message,
+    });
+  } catch (err) {
+    console.error('❌ Send summary error:', err);
+  }
+}, {
+  timezone: 'Asia/Bangkok',
+});
+
+/* ======================
    Root + Health
 ====================== */
 app.get('/', (req, res) => res.send('LINE Bot is running 🚀'));
@@ -118,6 +181,15 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
       const profile = await client.getProfile(userId);
       const name = profile.displayName;
+
+      // 👇👇👇 วาง whoami ตรงนี้
+      if (text === 'whoami') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `👤 ${name}\nYour userId is:\n${userId}`,
+        });
+        continue;
+      }
 
       /* ===== checkin ===== */
       if (text === 'checkin') {
