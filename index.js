@@ -206,7 +206,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `✅ ทำการบันทึกการทำงาน ${thaiDate}\nของ ${name} (${workTypeText}) เรียบร้อยค่ะ`,
+          text: `✅ ทำการบันทึกการทำงาน\n${thaiDate}\n${name}\n(${workTypeText}) เรียบร้อยค่ะ`,
         });
 
         continue;
