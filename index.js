@@ -18,16 +18,23 @@ const client = new line.Client(config);
 
 /* ======================
    PART 3 : In-memory state
-   (จำว่าคนไหนกำลัง check-in)
 ====================== */
+// คนที่กำลังเลือกปุ่ม
 const pendingCheckin = {};
 
+// คนที่ check-in วันนี้แล้ว
+const checkedInToday = {};
+
 /* ======================
-   PART 4 : Helper function
+   PART 4 : Helper functions
 ====================== */
 function isSunday() {
-  const today = new Date();
-  return today.getDay() === 0; // Sunday
+  return new Date().getDay() === 0;
+}
+
+function todayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 }
 
 /* ======================
@@ -65,21 +72,31 @@ app.post(
 
         const userId = event.source.userId;
         const text = event.message.text.trim().toLowerCase();
+        const today = todayKey();
+
+        // ดึงชื่อ user
+        const profile = await client.getProfile(userId);
+        const name = profile.displayName;
+
+        // init วัน
+        if (!checkedInToday[today]) {
+          checkedInToday[today] = {};
+        }
 
         /* ===== START CHECK-IN ===== */
         if (text === 'checkin') {
           if (isSunday()) {
             await client.replyMessage(event.replyToken, {
               type: 'text',
-              text: '❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ',
+              text: `❌ วันนี้วันอาทิตย์ ${name} ไม่ต้อง check-in ค่ะ`,
             });
             continue;
           }
 
-          if (pendingCheckin[userId]) {
+          if (checkedInToday[today][userId]) {
             await client.replyMessage(event.replyToken, {
               type: 'text',
-              text: '⚠️ คุณได้ทำการ check-in ไปแล้วค่ะ',
+              text: `⚠️ ${name} คุณ check-in วันนี้ไปแล้ว แก้ไขไม่ได้ค่ะ`,
             });
             continue;
           }
@@ -88,7 +105,7 @@ app.post(
 
           await client.replyMessage(event.replyToken, {
             type: 'text',
-            text: 'วันนี้คุณทำงานแบบไหน?',
+            text: `${name} วันนี้คุณทำงานแบบไหน?`,
             quickReply: {
               items: [
                 {
@@ -141,16 +158,17 @@ app.post(
           if (!workType) {
             await client.replyMessage(event.replyToken, {
               type: 'text',
-              text: '⚠️ กรุณาเลือกจากปุ่มเท่านั้นค่ะ',
+              text: `${name} กรุณาเลือกจากปุ่มเท่านั้นค่ะ`,
             });
             continue;
           }
 
           delete pendingCheckin[userId];
+          checkedInToday[today][userId] = workType;
 
           await client.replyMessage(event.replyToken, {
             type: 'text',
-            text: `✅ บันทึกการทำงาน: ${workType} เรียบร้อยแล้ว`,
+            text: `✅ ${name} บันทึกการทำงานวันนี้: ${workType} เรียบร้อยแล้ว`,
           });
           continue;
         }
@@ -158,7 +176,7 @@ app.post(
         /* ===== DEFAULT ===== */
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: 'พิมพ์คำว่า "checkin" เพื่อเริ่มลงเวลาทำงานค่ะ',
+          text: `สวัสดี ${name} 👋 พิมพ์ "checkin" เพื่อเริ่มลงเวลาทำงานค่ะ`,
         });
       }
 
