@@ -19,10 +19,7 @@ const client = new line.Client(config);
 /* ======================
    PART 3 : In-memory state
 ====================== */
-// คนที่กำลังเลือกปุ่ม
 const pendingCheckin = {};
-
-// คนที่ check-in วันนี้แล้ว
 const checkedInToday = {};
 
 /* ======================
@@ -35,6 +32,43 @@ function isSunday() {
 function todayKey() {
   const d = new Date();
   return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+// แปลงวันที่เป็นภาษาไทย + พ.ศ.
+function getThaiDateString() {
+  const date = new Date();
+
+  const days = [
+    'วันอาทิตย์',
+    'วันจันทร์',
+    'วันอังคาร',
+    'วันพุธ',
+    'วันพฤหัสบดี',
+    'วันศุกร์',
+    'วันเสาร์',
+  ];
+
+  const months = [
+    'มกราคม',
+    'กุมภาพันธ์',
+    'มีนาคม',
+    'เมษายน',
+    'พฤษภาคม',
+    'มิถุนายน',
+    'กรกฎาคม',
+    'สิงหาคม',
+    'กันยายน',
+    'ตุลาคม',
+    'พฤศจิกายน',
+    'ธันวาคม',
+  ];
+
+  const dayName = days[date.getDay()];
+  const day = date.getDate();
+  const month = months[date.getMonth()];
+  const year = date.getFullYear() + 543;
+
+  return `${dayName}ที่ ${day} ${month} ${year}`;
 }
 
 /* ======================
@@ -73,12 +107,11 @@ app.post(
         const userId = event.source.userId;
         const text = event.message.text.trim().toLowerCase();
         const today = todayKey();
+        const thaiDate = getThaiDateString();
 
-        // ดึงชื่อ user
         const profile = await client.getProfile(userId);
         const name = profile.displayName;
 
-        // init วัน
         if (!checkedInToday[today]) {
           checkedInToday[today] = {};
         }
@@ -88,7 +121,7 @@ app.post(
           if (isSunday()) {
             await client.replyMessage(event.replyToken, {
               type: 'text',
-              text: `❌ วันนี้วันอาทิตย์ ${name} ไม่ต้อง check-in ค่ะ`,
+              text: `❌ ${thaiDate} เป็นวันอาทิตย์ ${name} ไม่ต้อง check-in ค่ะ`,
             });
             continue;
           }
@@ -96,7 +129,7 @@ app.post(
           if (checkedInToday[today][userId]) {
             await client.replyMessage(event.replyToken, {
               type: 'text',
-              text: `⚠️ ${name} คุณ check-in วันนี้ไปแล้ว แก้ไขไม่ได้ค่ะ`,
+              text: `⚠️ ${name} ได้ทำการ check-in สำหรับ${thaiDate} ไปแล้ว แก้ไขไม่ได้ค่ะ`,
             });
             continue;
           }
@@ -105,7 +138,7 @@ app.post(
 
           await client.replyMessage(event.replyToken, {
             type: 'text',
-            text: `${name} วันนี้คุณทำงานแบบไหน?`,
+            text: `${thaiDate}\n${name} วันนี้คุณทำงานแบบไหนคะ?`,
             quickReply: {
               items: [
                 {
@@ -168,7 +201,7 @@ app.post(
 
           await client.replyMessage(event.replyToken, {
             type: 'text',
-            text: `✅ ${name} บันทึกการทำงานวันนี้: ${workType} เรียบร้อยแล้ว`,
+            text: `ทำการบันทึกการทำงาน ${thaiDate} ของ ${name} (${workType}) เรียบร้อยค่ะ`,
           });
           continue;
         }
