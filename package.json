@@ -13,6 +13,7 @@
   "dependencies": {
     "@line/bot-sdk": "^10.5.0",
     "express": "^5.2.1",
+    "googleapis": "^170.0.0",
     "node-cron": "^4.2.1"
   }
 }

@@ -1,23 +1,60 @@
+/* ======================
+   Google Sheets
+====================== */
+const { google } = require('googleapis');
+
+const auth = new google.auth.JWT(
+  process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  null,
+  process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  ['https://www.googleapis.com/auth/spreadsheets']
+);
+
+const sheets = google.sheets({ version: 'v4', auth });
+
+async function saveCheckinToSheet({ date, userId, name, workType }) {
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: 'A:E',
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [[
+        date,
+        userId,
+        name,
+        workType,
+        new Date().toLocaleString('th-TH')
+      ]],
+    },
+  });
+}
+
+/* ======================
+   Express + LINE
+====================== */
 const express = require('express');
 const line = require('@line/bot-sdk');
-const cron = require('node-cron'); // ✅ เพิ่ม cron
+const cron = require('node-cron');
 
 const app = express();
 
-/* ======================
-   LINE config
-====================== */
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET,
 };
-
 const client = new line.Client(config);
 
 /* ======================
-   Memory เก็บ check-in
+   🧠 In-memory storage
 ====================== */
-const checkinStore = {};
+
+// 📌 พนักงานทั้งหมดที่เคยคุยกับบอท
+const employeeList = {}; 
+// { userId: { name } }
+
+// 📌 check-in เฉพาะ “วันนี้”
+const checkinStore = {}; 
+// { userId: { date, workType } }
 
 /* ======================
    Helper functions
@@ -45,129 +82,75 @@ function formatThaiDate() {
   return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()+543}`;
 }
 
-function hasNotCheckedInToday(userId, today) {
-  return !checkinStore[userId] || checkinStore[userId].date !== today;
-}
-
 /* ======================
    🔔 Auto Reminder
 ====================== */
-
-// ⏰ 09:00 เตือนครั้งแรก
-cron.schedule('0 9 * * *', async () => {
+async function sendReminder(label) {
   if (isSunday()) return;
 
   const today = getToday();
   const thaiDate = formatThaiDate();
 
-  for (const userId in checkinStore) {
-    if (hasNotCheckedInToday(userId, today)) {
-      try {
-        const profile = await client.getProfile(userId);
-        await client.pushMessage(userId, {
-          type: 'text',
-          text: `⏰ แจ้งเตือน 09:00\n${thaiDate}\n${profile.displayName} อย่าลืม check-in นะคะ`,
-        });
-      } catch (err) {
-        console.error('09:00 reminder error:', err);
-      }
+  for (const userId in employeeList) {
+    if (checkinStore[userId]?.date !== today) {
+      await client.pushMessage(userId, {
+        type: 'text',
+        text: `${label}\n${thaiDate}\n${employeeList[userId].name} อย่าลืม check-in นะคะ`,
+      }).catch(console.error);
     }
   }
-}, { timezone: 'Asia/Bangkok' });
+}
 
-// ⚠️ 09:20 เตือนครั้งสุดท้าย
-cron.schedule('20 9 * * *', async () => {
-  if (isSunday()) return;
+cron.schedule('0 9 * * *', () => sendReminder('⏰ แจ้งเตือน 09:00'), {
+  timezone: 'Asia/Bangkok',
+});
 
-  const today = getToday();
-  const thaiDate = formatThaiDate();
-
-  for (const userId in checkinStore) {
-    if (hasNotCheckedInToday(userId, today)) {
-      try {
-        const profile = await client.getProfile(userId);
-        await client.pushMessage(userId, {
-          type: 'text',
-          text: `⚠️ แจ้งเตือนครั้งสุดท้าย (09:20)\n${thaiDate}\n${profile.displayName}\nระบบจะปิด check-in เวลา 09:30`,
-        });
-      } catch (err) {
-        console.error('09:20 reminder error:', err);
-      }
-    }
-  }
-}, { timezone: 'Asia/Bangkok' });
+cron.schedule('20 9 * * *', () => sendReminder('⚠️ แจ้งเตือนครั้งสุดท้าย 09:20\nระบบจะปิด 09:30'), {
+  timezone: 'Asia/Bangkok',
+});
 
 /* ======================
-   📊 Daily Summary (09:45)
-   ส่งเฉพาะเจ้าของ
+   📊 Daily Summary 09:45
 ====================== */
 cron.schedule('45 9 * * *', async () => {
   if (isSunday()) return;
 
   const today = getToday();
   const thaiDate = formatThaiDate();
-  const adminId = process.env.ADMIN_USER_ID;
+  const adminIds = process.env.ADMIN_USER_IDS?.split(',') || [];
 
-  if (!adminId) {
-    console.error('❌ ADMIN_USER_ID not set');
-    return;
-  }
+  let checked = [];
+  let notChecked = [];
 
-  let checkedIn = [];
-  let notCheckedIn = [];
-
-  for (const userId in checkinStore) {
-    try {
-      const profile = await client.getProfile(userId);
-      const name = profile.displayName;
-
-      if (checkinStore[userId].date === today) {
-        const typeMap = {
-          'work:full': 'เต็มวัน',
-          'work:half-morning': 'ครึ่งวันเช้า',
-          'work:half-afternoon': 'ครึ่งวันบ่าย',
-          'work:off': 'หยุดงาน',
-        };
-
-        checkedIn.push(
-          `• ${name} (${typeMap[checkinStore[userId].workType]})`
-        );
-      } else {
-        notCheckedIn.push(`• ${name}`);
-      }
-    } catch (err) {
-      console.error('Profile error:', err);
+  for (const userId in employeeList) {
+    const name = employeeList[userId].name;
+    if (checkinStore[userId]?.date === today) {
+      checked.push(`• ${name}`);
+    } else {
+      notChecked.push(`• ${name}`);
     }
   }
 
-  let message = `📊 สรุปการทำงานประจำวัน\n${thaiDate}\n\n`;
+  const message =
+`📊 สรุปการทำงานประจำวัน
+${thaiDate}
 
-  message += `✅ check-in แล้ว (${checkedIn.length})\n`;
-  message += checkedIn.length ? checkedIn.join('\n') : '- ไม่มี -';
+✅ check-in แล้ว (${checked.length})
+${checked.join('\n') || '-'}
 
-  message += `\n\n❌ ไม่ได้ check-in (${notCheckedIn.length})\n`;
-  message += notCheckedIn.length ? notCheckedIn.join('\n') : '- ไม่มี -';
+❌ ยังไม่ check-in (${notChecked.length})
+${notChecked.join('\n') || '-'}`;
 
-  try {
+  for (const adminId of adminIds) {
     await client.pushMessage(adminId, {
       type: 'text',
       text: message,
-    });
-  } catch (err) {
-    console.error('❌ Send summary error:', err);
+    }).catch(console.error);
   }
-}, {
-  timezone: 'Asia/Bangkok',
-});
+}, { timezone: 'Asia/Bangkok' });
 
 /* ======================
-   Root + Health
-====================== */
-app.get('/', (req, res) => res.send('LINE Bot is running 🚀'));
-app.get('/health', (req, res) => res.send('OK'));
-
-/* ======================
-   LINE Webhook
+   Webhook
 ====================== */
 app.post('/webhook', line.middleware(config), async (req, res) => {
   try {
@@ -182,41 +165,24 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       const profile = await client.getProfile(userId);
       const name = profile.displayName;
 
-      // 👇👇👇 วาง whoami ตรงนี้
+      // ✅ ลงทะเบียนพนักงานอัตโนมัติ
+      employeeList[userId] = { name };
+
       if (text === 'whoami') {
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `👤 ${name}\nYour userId is:\n${userId}`,
+          text: `👤 ${name}\nuserId:\n${userId}`,
         });
         continue;
       }
 
-      /* ===== checkin ===== */
       if (text === 'checkin') {
-
-        if (isSunday()) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ',
-          });
-          continue;
-        }
-
-        if (isAfter0930()) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `⛔ ${name} ระบบปิด check-in แล้ว (หลัง 09:30)`,
-          });
-          continue;
-        }
-
-        if (checkinStore[userId]?.date === today) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `⚠️ ${name} วันนี้คุณบันทึกไปแล้ว`,
-          });
-          continue;
-        }
+        if (isSunday())
+          return client.replyMessage(event.replyToken,{type:'text',text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ'});
+        if (isAfter0930())
+          return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ${name} ระบบปิดแล้ว (หลัง 09:30)`});
+        if (checkinStore[userId]?.date === today)
+          return client.replyMessage(event.replyToken,{type:'text',text:`⚠️ ${name} วันนี้คุณบันทึกไปแล้ว`});
 
         await client.replyMessage(event.replyToken, {
           type: 'template',
@@ -235,24 +201,9 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         continue;
       }
 
-      /* ===== รับคำตอบ ===== */
       if (text.startsWith('work:')) {
-
-        if (isAfter0930()) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `⛔ ${name} ระบบปิด check-in แล้ว`,
-          });
-          continue;
-        }
-
-        if (checkinStore[userId]?.date === today) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `⚠️ ${name} วันนี้คุณบันทึกไปแล้ว`,
-          });
-          continue;
-        }
+        if (isAfter0930())
+          return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ${name} ระบบปิดแล้ว`});
 
         const map = {
           'work:full': 'ทำงานเต็มวัน',
@@ -263,9 +214,16 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
         checkinStore[userId] = { date: today, workType: text };
 
+        await saveCheckinToSheet({
+          date: today,
+          userId,
+          name,
+          workType: map[text],
+        });
+
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `✅ ทำการบันทึกการทำงาน\n${thaiDate}\nของ ${name}\n(${map[text]}) เรียบร้อยค่ะ`,
+          text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${name} (${map[text]})`,
         });
       }
     }
@@ -278,9 +236,10 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 });
 
 /* ======================
-   Start server
+   Server
 ====================== */
+app.get('/', (_, res) => res.send('LINE Bot is running 🚀'));
+app.get('/health', (_, res) => res.send('OK'));
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
