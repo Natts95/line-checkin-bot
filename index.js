@@ -30,9 +30,16 @@ async function saveCheckinToSheet({ date, userId, name, workType }) {
 }
 
 /* ======================
-   👥 Employees
+   👥 Employees (CACHE)
 ====================== */
-async function loadEmployees() {
+let EMP_CACHE = {};
+let LAST_LOAD = 0;
+
+async function loadEmployees(force = false) {
+  if (!force && Date.now() - LAST_LOAD < 60_000) {
+    return EMP_CACHE;
+  }
+
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.SPREADSHEET_ID,
     range: 'employees!A2:D',
@@ -47,6 +54,8 @@ async function loadEmployees() {
     }
   }
 
+  EMP_CACHE = map;
+  LAST_LOAD = Date.now();
   return map;
 }
 
@@ -59,6 +68,8 @@ async function addEmployee(userId, name, role = 'employee') {
       values: [[userId, name, role, 'TRUE']],
     },
   });
+
+  await loadEmployees(true);
 }
 
 async function deactivateEmployee(userId) {
@@ -77,6 +88,8 @@ async function deactivateEmployee(userId) {
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [['FALSE']] },
   });
+
+  await loadEmployees(true);
 }
 
 /* ======================
@@ -85,6 +98,7 @@ async function deactivateEmployee(userId) {
 const express = require('express');
 const line = require('@line/bot-sdk');
 const cron = require('node-cron');
+const bodyParser = require('body-parser');
 
 const app = express();
 
@@ -92,6 +106,7 @@ const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET,
 };
+
 const client = new line.Client(config);
 
 /* ======================
@@ -121,18 +136,15 @@ function formatThaiDate() {
 }
 
 /* ======================
-   🔔 Auto Reminder
+   🔔 Auto Reminder (เดิมครบ)
 ====================== */
 async function sendReminder(label) {
   if (isSunday()) return;
 
   const employees = await loadEmployees();
-  const today = getToday();
   const thaiDate = formatThaiDate();
 
   for (const userId in employees) {
-    // ถ้า user ไม่ checkin วันนี้
-    // (ดูจาก sheet จริงไม่ได้ง่าย → reminder คือเตือนทุกคนก่อนปิด)
     await client.pushMessage(userId, {
       type: 'text',
       text: `${label}\n${thaiDate}\n${employees[userId].name} อย่าลืม check-in นะคะ`,
@@ -149,7 +161,7 @@ cron.schedule('20 9 * * *', () => sendReminder('⚠️ แจ้งเตือ�
 });
 
 /* ======================
-   📊 Daily Summary 09:45
+   📊 Daily Summary 09:45 (เดิมครบ)
 ====================== */
 cron.schedule('45 9 * * *', async () => {
   if (isSunday()) return;
@@ -197,92 +209,97 @@ ${notChecked.join('\n') || '-'}`;
 }, { timezone: 'Asia/Bangkok' });
 
 /* ======================
-   Webhook
+   Webhook (🔴 FIX สำคัญ)
 ====================== */
-app.post('/webhook', line.middleware(config), async (req, res) => {
-  try {
-    for (const event of req.body.events) {
-      if (event.type !== 'message' || event.message.type !== 'text') continue;
-
-      const userId = event.source.userId;
-      const text = event.message.text.trim();
-      const today = getToday();
-      const thaiDate = formatThaiDate();
-
+app.post(
+  '/webhook',
+  bodyParser.raw({ type: 'application/json' }),
+  line.middleware(config),
+  async (req, res) => {
+    try {
       const employees = await loadEmployees();
-      const employee = employees[userId];
 
-      if (text === 'whoami') {
-        const profile = await client.getProfile(userId);
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: `👤 ${profile.displayName}\nuserId:\n${userId}`,
-        });
-        continue;
+      for (const event of req.body.events) {
+        if (event.type !== 'message' || event.message.type !== 'text') continue;
+
+        const userId = event.source.userId;
+        const text = event.message.text.trim();
+        const employee = employees[userId];
+        const today = getToday();
+        const thaiDate = formatThaiDate();
+
+        if (text === 'whoami') {
+          const profile = await client.getProfile(userId);
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: `👤 ${profile.displayName}\nuserId:\n${userId}`,
+          });
+          continue;
+        }
+
+        if (!employee) {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '❌ คุณยังไม่ได้ถูกเพิ่มเป็นพนักงานในระบบ',
+          });
+          continue;
+        }
+
+        if (text === 'checkin') {
+          if (isSunday())
+            return client.replyMessage(event.replyToken,{type:'text',text:'❌ วันอาทิตย์ไม่ต้อง check-in'});
+          if (isAfter0930())
+            return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ${employee.name} ระบบปิดแล้ว (หลัง 09:30)`});
+
+          await client.replyMessage(event.replyToken, {
+            type: 'template',
+            altText: 'เลือกประเภทงาน',
+            template: {
+              type: 'buttons',
+              text: `${thaiDate}\n${employee.name} วันนี้คุณทำงานแบบไหนคะ`,
+              actions: [
+                { label: 'ทำงานเต็มวัน', type: 'message', text: 'work:full' },
+                { label: 'ครึ่งวันเช้า', type: 'message', text: 'work:half-morning' },
+                { label: 'ครึ่งวันบ่าย', type: 'message', text: 'work:half-afternoon' },
+                { label: 'หยุดงาน', type: 'message', text: 'work:off' },
+              ],
+            },
+          });
+          continue;
+        }
+
+        if (text.startsWith('work:')) {
+          if (isAfter0930())
+            return client.replyMessage(event.replyToken,{type:'text',text:'⛔ ระบบปิดแล้ว'});
+
+          const map = {
+            'work:full': 'ทำงานเต็มวัน',
+            'work:half-morning': 'ครึ่งวันเช้า',
+            'work:half-afternoon': 'ครึ่งวันบ่าย',
+            'work:off': 'หยุดงาน',
+          };
+
+          await saveCheckinToSheet({
+            date: today,
+            userId,
+            name: employee.name,
+            workType: map[text],
+          });
+
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${employee.name} (${map[text]})`,
+          });
+        }
       }
 
-      if (!employee) {
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: '❌ คุณยังไม่ได้ถูกเพิ่มเป็นพนักงานในระบบ',
-        });
-        continue;
-      }
-
-      if (text === 'checkin') {
-        if (isSunday())
-          return client.replyMessage(event.replyToken,{type:'text',text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ'});
-        if (isAfter0930())
-          return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ${employee.name} ระบบปิดแล้ว (หลัง 09:30)`});
-
-        await client.replyMessage(event.replyToken, {
-          type: 'template',
-          altText: 'เลือกประเภทงาน',
-          template: {
-            type: 'buttons',
-            text: `${thaiDate}\n${employee.name} วันนี้คุณทำงานแบบไหนคะ`,
-            actions: [
-              { label: 'ทำงานเต็มวัน', type: 'message', text: 'work:full' },
-              { label: 'ครึ่งวันเช้า', type: 'message', text: 'work:half-morning' },
-              { label: 'ครึ่งวันบ่าย', type: 'message', text: 'work:half-afternoon' },
-              { label: 'หยุดงาน', type: 'message', text: 'work:off' },
-            ],
-          },
-        });
-        continue;
-      }
-
-      if (text.startsWith('work:')) {
-        if (isAfter0930())
-          return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ระบบปิดแล้ว`});
-
-        const map = {
-          'work:full': 'ทำงานเต็มวัน',
-          'work:half-morning': 'ครึ่งวันเช้า',
-          'work:half-afternoon': 'ครึ่งวันบ่าย',
-          'work:off': 'หยุดงาน',
-        };
-
-        await saveCheckinToSheet({
-          date: today,
-          userId,
-          name: employee.name,
-          workType: map[text],
-        });
-
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${employee.name} (${map[text]})`,
-        });
-      }
+      res.sendStatus(200);
+    } catch (err) {
+      console.error(err);
+      res.sendStatus(500);
     }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error(err);
-    res.sendStatus(500);
   }
-});
+);
 
 /* ======================
    Server
