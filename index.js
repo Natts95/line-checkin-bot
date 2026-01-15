@@ -221,7 +221,7 @@ app.post(
         if (event.type !== 'message' || event.message.type !== 'text') continue;
 
         const userId = event.source.userId;
-        const text = event.message.text.trim();
+        const text = event.message.text.trim().toLowerCase();
         const today = getToday();
         const thaiDate = formatThaiDate();
 
@@ -301,6 +301,11 @@ app.post(
           await client.replyMessage(event.replyToken, {
             type: 'text',
             text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${employee.name} (${map[text]})`,
+          });
+
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '❓ คำสั่งไม่ถูกต้อง\nพิมพ์ checkin เพื่อบันทึกการทำงานค่ะ',
           });
         }
       }
