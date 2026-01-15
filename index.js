@@ -15,7 +15,7 @@ const sheets = google.sheets({ version: 'v4', auth });
 async function saveCheckinToSheet({ date, userId, name, workType }) {
   await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.SPREADSHEET_ID,
-    range: 'A:E',
+    range: 'checkin!A:E',
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [[
@@ -26,6 +26,56 @@ async function saveCheckinToSheet({ date, userId, name, workType }) {
         new Date().toLocaleString('th-TH')
       ]],
     },
+  });
+}
+
+/* ======================
+   👥 Employees
+====================== */
+async function loadEmployees() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: 'employees!A2:D',
+  });
+
+  const rows = res.data.values || [];
+  const map = {};
+
+  for (const [userId, name, role, active] of rows) {
+    if (active === 'TRUE') {
+      map[userId] = { name, role };
+    }
+  }
+
+  return map;
+}
+
+async function addEmployee(userId, name, role = 'employee') {
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: 'employees!A:D',
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [[userId, name, role, 'TRUE']],
+    },
+  });
+}
+
+async function deactivateEmployee(userId) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: 'employees!A2:D',
+  });
+
+  const rows = res.data.values || [];
+  const rowIndex = rows.findIndex(r => r[0] === userId);
+  if (rowIndex === -1) return;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `employees!D${rowIndex + 2}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [['FALSE']] },
   });
 }
 
@@ -43,18 +93,6 @@ const config = {
   channelSecret: process.env.CHANNEL_SECRET,
 };
 const client = new line.Client(config);
-
-/* ======================
-   🧠 In-memory storage
-====================== */
-
-// 📌 พนักงานทั้งหมดที่เคยคุยกับบอท
-const employeeList = {}; 
-// { userId: { name } }
-
-// 📌 check-in เฉพาะ “วันนี้”
-const checkinStore = {}; 
-// { userId: { date, workType } }
 
 /* ======================
    Helper functions
@@ -88,16 +126,17 @@ function formatThaiDate() {
 async function sendReminder(label) {
   if (isSunday()) return;
 
+  const employees = await loadEmployees();
   const today = getToday();
   const thaiDate = formatThaiDate();
 
-  for (const userId in employeeList) {
-    if (checkinStore[userId]?.date !== today) {
-      await client.pushMessage(userId, {
-        type: 'text',
-        text: `${label}\n${thaiDate}\n${employeeList[userId].name} อย่าลืม check-in นะคะ`,
-      }).catch(console.error);
-    }
+  for (const userId in employees) {
+    // ถ้า user ไม่ checkin วันนี้
+    // (ดูจาก sheet จริงไม่ได้ง่าย → reminder คือเตือนทุกคนก่อนปิด)
+    await client.pushMessage(userId, {
+      type: 'text',
+      text: `${label}\n${thaiDate}\n${employees[userId].name} อย่าลืม check-in นะคะ`,
+    }).catch(console.error);
   }
 }
 
@@ -115,20 +154,26 @@ cron.schedule('20 9 * * *', () => sendReminder('⚠️ แจ้งเตือ�
 cron.schedule('45 9 * * *', async () => {
   if (isSunday()) return;
 
+  const employees = await loadEmployees();
   const today = getToday();
   const thaiDate = formatThaiDate();
-  const adminIds = process.env.ADMIN_USER_IDS?.split(',') || [];
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: 'checkin!A2:E',
+  });
+
+  const rows = res.data.values || [];
+  const todayCheckins = rows.filter(r => r[0] === today);
+  const checkedIds = new Set(todayCheckins.map(r => r[1]));
 
   let checked = [];
   let notChecked = [];
 
-  for (const userId in employeeList) {
-    const name = employeeList[userId].name;
-    if (checkinStore[userId]?.date === today) {
-      checked.push(`• ${name}`);
-    } else {
-      notChecked.push(`• ${name}`);
-    }
+  for (const userId in employees) {
+    const name = employees[userId].name;
+    if (checkedIds.has(userId)) checked.push(`• ${name}`);
+    else notChecked.push(`• ${name}`);
   }
 
   const message =
@@ -141,11 +186,13 @@ ${checked.join('\n') || '-'}
 ❌ ยังไม่ check-in (${notChecked.length})
 ${notChecked.join('\n') || '-'}`;
 
-  for (const adminId of adminIds) {
-    await client.pushMessage(adminId, {
-      type: 'text',
-      text: message,
-    }).catch(console.error);
+  for (const userId in employees) {
+    if (employees[userId].role === 'admin') {
+      await client.pushMessage(userId, {
+        type: 'text',
+        text: message,
+      }).catch(console.error);
+    }
   }
 }, { timezone: 'Asia/Bangkok' });
 
@@ -158,20 +205,26 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       if (event.type !== 'message' || event.message.type !== 'text') continue;
 
       const userId = event.source.userId;
-      const text = event.message.text.toLowerCase().trim();
+      const text = event.message.text.trim();
       const today = getToday();
       const thaiDate = formatThaiDate();
 
-      const profile = await client.getProfile(userId);
-      const name = profile.displayName;
-
-      // ✅ ลงทะเบียนพนักงานอัตโนมัติ
-      employeeList[userId] = { name };
+      const employees = await loadEmployees();
+      const employee = employees[userId];
 
       if (text === 'whoami') {
+        const profile = await client.getProfile(userId);
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `👤 ${name}\nuserId:\n${userId}`,
+          text: `👤 ${profile.displayName}\nuserId:\n${userId}`,
+        });
+        continue;
+      }
+
+      if (!employee) {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ คุณยังไม่ได้ถูกเพิ่มเป็นพนักงานในระบบ',
         });
         continue;
       }
@@ -180,16 +233,14 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         if (isSunday())
           return client.replyMessage(event.replyToken,{type:'text',text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ'});
         if (isAfter0930())
-          return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ${name} ระบบปิดแล้ว (หลัง 09:30)`});
-        if (checkinStore[userId]?.date === today)
-          return client.replyMessage(event.replyToken,{type:'text',text:`⚠️ ${name} วันนี้คุณบันทึกไปแล้ว`});
+          return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ${employee.name} ระบบปิดแล้ว (หลัง 09:30)`});
 
         await client.replyMessage(event.replyToken, {
           type: 'template',
           altText: 'เลือกประเภทงาน',
           template: {
             type: 'buttons',
-            text: `${thaiDate}\n${name} วันนี้คุณทำงานแบบไหนคะ`,
+            text: `${thaiDate}\n${employee.name} วันนี้คุณทำงานแบบไหนคะ`,
             actions: [
               { label: 'ทำงานเต็มวัน', type: 'message', text: 'work:full' },
               { label: 'ครึ่งวันเช้า', type: 'message', text: 'work:half-morning' },
@@ -203,7 +254,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
       if (text.startsWith('work:')) {
         if (isAfter0930())
-          return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ${name} ระบบปิดแล้ว`});
+          return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ระบบปิดแล้ว`});
 
         const map = {
           'work:full': 'ทำงานเต็มวัน',
@@ -212,18 +263,16 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           'work:off': 'หยุดงาน',
         };
 
-        checkinStore[userId] = { date: today, workType: text };
-
         await saveCheckinToSheet({
           date: today,
           userId,
-          name,
+          name: employee.name,
           workType: map[text],
         });
 
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${name} (${map[text]})`,
+          text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${employee.name} (${map[text]})`,
         });
       }
     }
