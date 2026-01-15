@@ -217,17 +217,15 @@ app.post(
   line.middleware(config),
   async (req, res) => {
     try {
-      const employees = await loadEmployees();
-
       for (const event of req.body.events) {
         if (event.type !== 'message' || event.message.type !== 'text') continue;
 
         const userId = event.source.userId;
         const text = event.message.text.trim();
-        const employee = employees[userId];
         const today = getToday();
         const thaiDate = formatThaiDate();
 
+        /* ===== ตอบ whoami ทันที (ห้ามโหลด sheet ก่อน) ===== */
         if (text === 'whoami') {
           const profile = await client.getProfile(userId);
           await client.replyMessage(event.replyToken, {
@@ -236,6 +234,10 @@ app.post(
           });
           continue;
         }
+
+        /* ===== คำสั่งอื่นค่อยโหลด employees ===== */
+        const employees = await loadEmployees();
+        const employee = employees[userId];
 
         if (!employee) {
           await client.replyMessage(event.replyToken, {
@@ -247,9 +249,16 @@ app.post(
 
         if (text === 'checkin') {
           if (isSunday())
-            return client.replyMessage(event.replyToken,{type:'text',text:'❌ วันอาทิตย์ไม่ต้อง check-in'});
+            return client.replyMessage(event.replyToken,{
+              type:'text',
+              text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ'
+            });
+
           if (isAfter0930())
-            return client.replyMessage(event.replyToken,{type:'text',text:`⛔ ${employee.name} ระบบปิดแล้ว (หลัง 09:30)`});
+            return client.replyMessage(event.replyToken,{
+              type:'text',
+              text:`⛔ ${employee.name} ระบบปิดแล้ว (หลัง 09:30)`
+            });
 
           await client.replyMessage(event.replyToken, {
             type: 'template',
@@ -270,7 +279,10 @@ app.post(
 
         if (text.startsWith('work:')) {
           if (isAfter0930())
-            return client.replyMessage(event.replyToken,{type:'text',text:'⛔ ระบบปิดแล้ว'});
+            return client.replyMessage(event.replyToken,{
+              type:'text',
+              text:'⛔ ระบบปิดแล้ว'
+            });
 
           const map = {
             'work:full': 'ทำงานเต็มวัน',
@@ -295,7 +307,7 @@ app.post(
 
       res.sendStatus(200);
     } catch (err) {
-      console.error(err);
+      console.error('WEBHOOK ERROR:', err);
       res.sendStatus(500);
     }
   }
