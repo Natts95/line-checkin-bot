@@ -1,5 +1,12 @@
+const express = require('express');
+const line = require('@line/bot-sdk');
+const cron = require('node-cron');
+const bodyParser = require('body-parser');
 const { google } = require('googleapis');
 
+/* ======================
+   Google Sheets
+====================== */
 const auth = new google.auth.JWT(
   process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
   null,
@@ -12,7 +19,7 @@ const sheets = google.sheets({ version: 'v4', auth });
 async function saveCheckinToSheet({ date, userId, name, workType }) {
   await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.SPREADSHEET_ID,
-    range: 'A:E',
+    range: 'checkin!A:E',
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [[
@@ -20,21 +27,19 @@ async function saveCheckinToSheet({ date, userId, name, workType }) {
         userId,
         name,
         workType,
-        new Date().toLocaleString('th-TH')
+        new Date().toLocaleString('th-TH'),
       ]],
     },
   });
 }
 
-const express = require('express');
-const line = require('@line/bot-sdk');
-const cron = require('node-cron'); // ✅ เพิ่ม cron
-
+/* ======================
+   Express + LINE
+====================== */
 const app = express();
 
-/* ======================
-   LINE config
-====================== */
+app.use(bodyParser.json()); // ✅ สำคัญมาก
+
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET,
@@ -43,12 +48,12 @@ const config = {
 const client = new line.Client(config);
 
 /* ======================
-   Memory เก็บ check-in
+   Memory Store
 ====================== */
 const checkinStore = {};
 
 /* ======================
-   Helper functions
+   Helpers
 ====================== */
 function getToday() {
   return new Date().toISOString().split('T')[0];
@@ -59,8 +64,8 @@ function isSunday() {
 }
 
 function isAfter0930() {
-  const now = new Date();
-  return now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() >= 30);
+  const d = new Date();
+  return d.getHours() > 9 || (d.getHours() === 9 && d.getMinutes() >= 30);
 }
 
 function formatThaiDate() {
@@ -68,9 +73,9 @@ function formatThaiDate() {
   const days = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
   const months = [
     'มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน',
-    'กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'
+    'กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม',
   ];
-  return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()+543}`;
+  return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear() + 543}`;
 }
 
 function hasNotCheckedInToday(userId, today) {
@@ -80,8 +85,6 @@ function hasNotCheckedInToday(userId, today) {
 /* ======================
    🔔 Auto Reminder
 ====================== */
-
-// ⏰ 09:00 เตือนครั้งแรก
 cron.schedule('0 9 * * *', async () => {
   if (isSunday()) return;
 
@@ -96,14 +99,13 @@ cron.schedule('0 9 * * *', async () => {
           type: 'text',
           text: `⏰ แจ้งเตือน 09:00\n${thaiDate}\n${profile.displayName} อย่าลืม check-in นะคะ`,
         });
-      } catch (err) {
-        console.error('09:00 reminder error:', err);
+      } catch (e) {
+        console.error(e.message);
       }
     }
   }
 }, { timezone: 'Asia/Bangkok' });
 
-// ⚠️ 09:20 เตือนครั้งสุดท้าย
 cron.schedule('20 9 * * *', async () => {
   if (isSunday()) return;
 
@@ -116,18 +118,17 @@ cron.schedule('20 9 * * *', async () => {
         const profile = await client.getProfile(userId);
         await client.pushMessage(userId, {
           type: 'text',
-          text: `⚠️ แจ้งเตือนครั้งสุดท้าย (09:20)\n${thaiDate}\n${profile.displayName}\nระบบจะปิด check-in เวลา 09:30`,
+          text: `⚠️ แจ้งเตือนครั้งสุดท้าย (09:20)\n${thaiDate}\nระบบจะปิด check-in เวลา 09:30`,
         });
-      } catch (err) {
-        console.error('09:20 reminder error:', err);
+      } catch (e) {
+        console.error(e.message);
       }
     }
   }
 }, { timezone: 'Asia/Bangkok' });
 
 /* ======================
-   📊 Daily Summary (09:45)
-   ส่งเฉพาะเจ้าของ
+   📊 Daily Summary
 ====================== */
 cron.schedule('45 9 * * *', async () => {
   if (isSunday()) return;
@@ -135,67 +136,37 @@ cron.schedule('45 9 * * *', async () => {
   const today = getToday();
   const thaiDate = formatThaiDate();
   const adminId = process.env.ADMIN_USER_ID;
-
-  if (!adminId) {
-    console.error('❌ ADMIN_USER_ID not set');
-    return;
-  }
+  if (!adminId) return;
 
   let checkedIn = [];
   let notCheckedIn = [];
 
   for (const userId in checkinStore) {
-    try {
-      const profile = await client.getProfile(userId);
-      const name = profile.displayName;
+    const profile = await client.getProfile(userId);
+    const name = profile.displayName;
 
-      if (checkinStore[userId].date === today) {
-        const typeMap = {
-          'work:full': 'เต็มวัน',
-          'work:half-morning': 'ครึ่งวันเช้า',
-          'work:half-afternoon': 'ครึ่งวันบ่าย',
-          'work:off': 'หยุดงาน',
-        };
-
-        checkedIn.push(
-          • ${name} (${typeMap[checkinStore[userId].workType]})
-        );
-      } else {
-        notCheckedIn.push(`• ${name}`);
-      }
-    } catch (err) {
-      console.error('Profile error:', err);
+    if (checkinStore[userId].date === today) {
+      checkedIn.push(`• ${name}`);
+    } else {
+      notCheckedIn.push(`• ${name}`);
     }
   }
 
-  let message = `📊 สรุปการทำงานประจำวัน\n${thaiDate}\n\n`;
+  const msg =
+`📊 สรุปการทำงานประจำวัน
+${thaiDate}
 
-  message += `✅ check-in แล้ว (${checkedIn.length})\n`;
-  message += checkedIn.length ? checkedIn.join('\n') : '- ไม่มี -';
+✅ check-in แล้ว (${checkedIn.length})
+${checkedIn.join('\n') || '-'}
 
-  message += `\n\n❌ ไม่ได้ check-in (${notCheckedIn.length})\n`;
-  message += notCheckedIn.length ? notCheckedIn.join('\n') : '- ไม่มี -';
+❌ ยังไม่ check-in (${notCheckedIn.length})
+${notCheckedIn.join('\n') || '-'}`;
 
-  try {
-    await client.pushMessage(adminId, {
-      type: 'text',
-      text: message,
-    });
-  } catch (err) {
-    console.error('❌ Send summary error:', err);
-  }
-}, {
-  timezone: 'Asia/Bangkok',
-});
+  await client.pushMessage(adminId, { type: 'text', text: msg });
+}, { timezone: 'Asia/Bangkok' });
 
 /* ======================
-   Root + Health
-====================== */
-app.get('/', (req, res) => res.send('LINE Bot is running 🚀'));
-app.get('/health', (req, res) => res.send('OK'));
-
-/* ======================
-   LINE Webhook
+   Webhook
 ====================== */
 app.post('/webhook', line.middleware(config), async (req, res) => {
   try {
@@ -210,41 +181,20 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       const profile = await client.getProfile(userId);
       const name = profile.displayName;
 
-      // 👇👇👇 วาง whoami ตรงนี้
       if (text === 'whoami') {
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `👤 ${name}\nYour userId is:\n${userId}`,
+          text: `👤 ${name}\nuserId:\n${userId}`,
         });
         continue;
       }
 
-      /* ===== checkin ===== */
       if (text === 'checkin') {
+        if (isSunday())
+          return client.replyMessage(event.replyToken,{ type:'text', text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ' });
 
-        if (isSunday()) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ',
-          });
-          continue;
-        }
-
-        if (isAfter0930()) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `⛔ ${name} ระบบปิด check-in แล้ว (หลัง 09:30)`,
-          });
-          continue;
-        }
-
-        if (checkinStore[userId]?.date === today) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `⚠️ ${name} วันนี้คุณบันทึกไปแล้ว`,
-          });
-          continue;
-        }
+        if (isAfter0930())
+          return client.replyMessage(event.replyToken,{ type:'text', text:'⛔ ระบบปิด check-in แล้ว (หลัง 09:30)' });
 
         await client.replyMessage(event.replyToken, {
           type: 'template',
@@ -260,61 +210,37 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
             ],
           },
         });
-        continue;
       }
 
-      /* ===== รับคำตอบ ===== */
       if (text.startsWith('work:')) {
-
-        if (isAfter0930()) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `⛔ ${name} ระบบปิด check-in แล้ว`,
-          });
-          continue;
-        }
-
-        if (checkinStore[userId]?.date === today) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: `⚠️ ${name} วันนี้คุณบันทึกไปแล้ว`,
-          });
-          continue;
-        }
-
-        const map = {
-          'work:full': 'ทำงานเต็มวัน',
-          'work:half-morning': 'ครึ่งวันเช้า',
-          'work:half-afternoon': 'ครึ่งวันบ่าย',
-          'work:off': 'หยุดงาน',
-        };
-
         checkinStore[userId] = { date: today, workType: text };
+
         await saveCheckinToSheet({
           date: today,
           userId,
           name,
-          workType: map[text],
+          workType: text,
         });
 
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `✅ ทำการบันทึกการทำงาน\n${thaiDate}\nของ ${name}\n(${map[text]}) เรียบร้อยค่ะ`,
+          text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${name}`,
         });
       }
     }
 
     res.sendStatus(200);
-  } catch (err) {
-    console.error(err);
+  } catch (e) {
+    console.error('WEBHOOK ERROR:', e);
     res.sendStatus(500);
   }
 });
 
 /* ======================
-   Start server
+   Server
 ====================== */
+app.get('/', (_, res) => res.send('LINE Bot is running 🚀'));
+app.get('/health', (_, res) => res.send('OK'));
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
