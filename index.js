@@ -29,6 +29,17 @@ async function saveCheckinToSheet({ date, userId, name, workType }) {
   });
 }
 
+async function hasCheckedInToday(userId) {
+  const today = getToday();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: 'checkin!A2:B',
+  });
+
+  const rows = res.data.values || [];
+  return rows.some(r => r[0] === today && r[1] === userId);
+}
+
 /* ======================
    👥 Employees (CACHE)
 ====================== */
@@ -43,7 +54,7 @@ async function loadEmployees(force = false) {
     range: 'employees!A2:D',
   });
 
-  const rows = res.data.values || {};
+  const rows = res.data.values || [];
   const map = {};
 
   for (const [userId, name, role, active] of rows) {
@@ -74,7 +85,7 @@ const config = {
 const client = new line.Client(config);
 
 /* ======================
-   Helper
+   Helpers
 ====================== */
 function getToday() {
   return new Date().toISOString().split('T')[0];
@@ -99,34 +110,33 @@ function formatThaiDate() {
   return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()+543}`;
 }
 
-async function hasCheckedInToday(userId) {
-  const today = getToday();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.SPREADSHEET_ID,
-    range: 'checkin!A2:B',
-  });
-
-  const rows = res.data.values || [];
-  return rows.some(r => r[0] === today && r[1] === userId);
-}
-
 /* ======================
    🔔 Reminder
 ====================== */
 async function sendReminder(label) {
   if (isSunday()) return;
 
-  const employees = await loadEmployees();
+  let employees;
+  try {
+    employees = await loadEmployees();
+  } catch (e) {
+    console.error('LOAD EMP ERROR:', e);
+    return;
+  }
+
   const thaiDate = formatThaiDate();
-  const today = getToday();
 
   for (const userId in employees) {
-    if (await hasCheckedInToday(userId)) continue;
+    try {
+      if (await hasCheckedInToday(userId)) continue;
 
-    await client.pushMessage(userId, {
-      type: 'text',
-      text: `${label}\n${thaiDate}\n${employees[userId].name} อย่าลืม check-in นะคะ`,
-    }).catch(console.error);
+      await client.pushMessage(userId, {
+        type: 'text',
+        text: `${label}\n${thaiDate}\n${employees[userId].name} อย่าลืม check-in นะคะ`,
+      });
+    } catch (e) {
+      console.error('REMINDER ERROR:', e);
+    }
   }
 }
 
@@ -139,16 +149,29 @@ cron.schedule('20 9 * * *', () => sendReminder('⚠️ แจ้งเตือ�
 cron.schedule('45 9 * * *', async () => {
   if (isSunday()) return;
 
-  const employees = await loadEmployees();
+  let employees;
+  try {
+    employees = await loadEmployees();
+  } catch (e) {
+    console.error('SUMMARY LOAD EMP ERROR:', e);
+    return;
+  }
+
   const today = getToday();
   const thaiDate = formatThaiDate();
 
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.SPREADSHEET_ID,
-    range: 'checkin!A2:E',
-  });
+  let rows = [];
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: 'checkin!A2:E',
+    });
+    rows = res.data.values || [];
+  } catch (e) {
+    console.error('SUMMARY SHEET ERROR:', e);
+    return;
+  }
 
-  const rows = res.data.values || [];
   const checkedIds = new Set(rows.filter(r => r[0] === today).map(r => r[1]));
 
   let checked = [];
@@ -178,7 +201,7 @@ ${notChecked.join('\n') || '-'}`;
 }, { timezone:'Asia/Bangkok' });
 
 /* ======================
-   LINE Webhook (สำคัญมาก)
+   LINE Webhook (LINE-SAFE)
 ====================== */
 app.post('/webhook', line.middleware(config), async (req, res) => {
   try {
@@ -187,10 +210,9 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
       const userId = event.source.userId;
       const text = event.message.text.trim().toLowerCase();
-      const today = getToday();
       const thaiDate = formatThaiDate();
 
-      /* whoami */
+      /* ===== whoami ===== */
       if (text === 'whoami') {
         const profile = await client.getProfile(userId);
         await client.replyMessage(event.replyToken,{
@@ -200,9 +222,19 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         continue;
       }
 
-      const employees = await loadEmployees();
-      const employee = employees[userId];
+      /* โหลด employee หลัง whoami */
+      let employees;
+      try {
+        employees = await loadEmployees();
+      } catch (e) {
+        await client.replyMessage(event.replyToken,{
+          type:'text',
+          text:'⚠️ ระบบขัดข้อง กรุณาลองใหม่'
+        });
+        continue;
+      }
 
+      const employee = employees[userId];
       if (!employee) {
         await client.replyMessage(event.replyToken,{
           type:'text',
@@ -211,15 +243,17 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         continue;
       }
 
+      /* ===== checkin ===== */
       if (text === 'checkin') {
-        if (isSunday())
-          return client.replyMessage(event.replyToken,{ type:'text', text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ' });
+        if (isSunday()) {
+          await client.replyMessage(event.replyToken,{ type:'text', text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ' });
+          continue;
+        }
 
-        if (isAfter0930())
-          return client.replyMessage(event.replyToken,{ type:'text', text:'⛔ ระบบปิดแล้ว (หลัง 09:30)' });
-
-        if (await hasCheckedInToday(userId))
-          return client.replyMessage(event.replyToken,{ type:'text', text:'⚠️ วันนี้คุณ check-in ไปแล้ว' });
+        if (isAfter0930()) {
+          await client.replyMessage(event.replyToken,{ type:'text', text:'⛔ ระบบปิดแล้ว (หลัง 09:30)' });
+          continue;
+        }
 
         await client.replyMessage(event.replyToken,{
           type:'template',
@@ -238,12 +272,12 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         continue;
       }
 
+      /* ===== work ===== */
       if (text.startsWith('work:')) {
-        if (isAfter0930())
-          return client.replyMessage(event.replyToken,{ type:'text', text:'⛔ ระบบปิดแล้ว' });
-
-        if (await hasCheckedInToday(userId))
-          return client.replyMessage(event.replyToken,{ type:'text', text:'⚠️ วันนี้คุณ check-in ไปแล้ว' });
+        if (isAfter0930()) {
+          await client.replyMessage(event.replyToken,{ type:'text', text:'⛔ ระบบปิดแล้ว' });
+          continue;
+        }
 
         const map = {
           'work:full':'ทำงานเต็มวัน',
@@ -252,19 +286,36 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           'work:off':'หยุดงาน',
         };
 
-        if (!map[text]) return;
+        if (!map[text]) continue;
 
-        await saveCheckinToSheet({
-          date: today,
-          userId,
-          name: employee.name,
-          workType: map[text],
-        });
+        try {
+          if (await hasCheckedInToday(userId)) {
+            await client.replyMessage(event.replyToken,{
+              type:'text',
+              text:'⚠️ วันนี้คุณ check-in ไปแล้ว'
+            });
+            continue;
+          }
 
-        await client.replyMessage(event.replyToken,{
-          type:'text',
-          text:`✅ บันทึกเรียบร้อย\n${thaiDate}\n${employee.name} (${map[text]})`
-        });
+          await saveCheckinToSheet({
+            date: getToday(),
+            userId,
+            name: employee.name,
+            workType: map[text],
+          });
+
+          await client.replyMessage(event.replyToken,{
+            type:'text',
+            text:`✅ บันทึกเรียบร้อย\n${thaiDate}\n${employee.name} (${map[text]})`
+          });
+
+        } catch (e) {
+          console.error('SAVE ERROR:', e);
+          await client.replyMessage(event.replyToken,{
+            type:'text',
+            text:'⚠️ บันทึกไม่สำเร็จ กรุณาลองใหม่'
+          });
+        }
       }
     }
 
