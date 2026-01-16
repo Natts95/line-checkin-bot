@@ -22,14 +22,13 @@ const client = new line.Client(config);
 /* ======================
    Memory Store
 ====================== */
-// เก็บ Check-in รายสัปดาห์ (Key = userId)
-// Structure: { date: '2023-01-01', type: 'work:full' }
+// เก็บ Check-in รายสัปดาห์ (Key = userId) -> Array of objects
 let checkinStore = {}; 
 
-// เก็บธุรกรรมรายสัปดาห์ (Advance & Debt)
+// เก็บธุรกรรมรายสัปดาห์
 let weeklyTransactions = {
-    advance: {}, // { userId: amount }
-    repayment: {} // { userId: amount }
+    advance: {}, 
+    repayment: {} 
 };
 
 const employees = {}; // { userId: { name, active, dailyRate, totalDebt } }
@@ -38,7 +37,8 @@ const admins = {};
 /* ======================
    Google Sheets Functions
 ====================== */
-// 1. General Save Function (ใช้ร่วมกันได้)
+
+// 1. General Save Function
 async function saveToSheet(range, values) {
   try {
     await auth.authorize();
@@ -52,27 +52,68 @@ async function saveToSheet(range, values) {
   } catch (err) { console.error(`❌ Save Error (${range}):`, err.message); }
 }
 
-// 2. Load Employees + Financial Data
+// 2. ฟังก์ชันอัปเดตหนี้ (Auto Deduct)
+async function updateDebtInSheet(targetUserId, newDebtAmount) {
+  try {
+    await auth.authorize();
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    // อ่านข้อมูลเพื่อหาบรรทัด
+    const readRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: 'employee!B:B', 
+    });
+
+    const rows = readRes.data.values;
+    if (!rows || rows.length === 0) return;
+
+    let targetRow = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i][0] === targetUserId) {
+        targetRow = i + 1; // +1 เพราะ Sheet เริ่มนับที่ 1
+        break;
+      }
+    }
+
+    if (targetRow === -1) {
+      console.log(`❌ ไม่พบ UserID: ${targetUserId} เพื่ออัปเดตหนี้`);
+      return;
+    }
+
+    // อัปเดตช่อง G (TotalDebt)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `employee!G${targetRow}`, 
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[newDebtAmount]] },
+    });
+
+    console.log(`✅ อัปเดตหนี้ใหม่ใน Sheet เรียบร้อย: แถว ${targetRow}, ยอด ${newDebtAmount}`);
+  } catch (err) {
+    console.error('❌ UPDATE DEBT ERROR:', err.message);
+  }
+}
+
+// 3. Load Employees + Financial Data
 async function loadDataFromSheet() {
   console.log('🔄 Loading data...');
   try {
     await auth.authorize();
     const sheets = google.sheets({ version: 'v4', auth });
 
-    // Load Emp (Col A-F) -> Date, ID, Name, Status, AdminID, DailyRate, TotalDebt
+    // Load Emp (Col A-G)
     const empRes = await sheets.spreadsheets.values.get({ spreadsheetId: process.env.SPREADSHEET_ID, range: 'employee!A:G' });
     if (empRes.data.values) {
         empRes.data.values.forEach(row => {
             const [, uid, name, status, , rate, debt] = row;
             if(!uid || uid === 'UserId') return;
             
-            // Logic: เอาบรรทัดล่าสุดเสมอ
             if(status === 'active') {
                 employees[uid] = { 
                     name, 
                     active: true,
-                    dailyRate: parseInt(rate) || 0, // แปลงเป็นตัวเลข
-                    totalDebt: parseInt(debt) || 0  // แปลงเป็นตัวเลข
+                    dailyRate: parseInt(rate) || 0,
+                    totalDebt: parseInt(debt) || 0
                 };
             } else if(status === 'inactive' && employees[uid]) {
                 employees[uid].active = false;
@@ -91,13 +132,21 @@ async function loadDataFromSheet() {
         });
     }
 
-    // Load Check-ins for THIS WEEK (เพื่อคำนวณเงิน)
-    // หมายเหตุ: การดึงข้อมูลเพื่อนับวันทำงานย้อนหลังต้องใช้ Logic การกรองวันที่
-    // เพื่อความง่ายใน Memory เราจะโหลดของ "วันนี้" มาก่อนเหมือนเดิม
-    // ส่วนการคำนวณวันเสาร์ เราจะใช้ checkinStore ที่สะสมมาทั้งอาทิตย์ (อย่า Restart Server บ่อยช่วงระหว่างวีค)
-    // หรือถ้า Restart ต้องมีฟังก์ชัน loadWeeklyCheckins (ซึ่งซับซ้อนกว่านี้) 
-    // *เบื้องต้นใช้ logic สะสมใน memory ไปก่อน*
-    
+    // Load Checkins Today (กันระบบ Restart แล้วลืมว่าใครเช็คอินแล้ว)
+    const today = getToday();
+    const checkinRes = await sheets.spreadsheets.values.get({ spreadsheetId: process.env.SPREADSHEET_ID, range: 'checkin!A:E' });
+    if (checkinRes.data.values) {
+        checkinRes.data.values.forEach(row => {
+            // row[0]=date, row[1]=uid, row[3]=workType
+            if(row[0] === today) {
+                if(!checkinStore[row[1]]) checkinStore[row[1]] = [];
+                // เช็คว่ามีใน array หรือยังเพื่อกันซ้ำใน memory
+                const exists = checkinStore[row[1]].find(r => r.date === today);
+                if(!exists) checkinStore[row[1]].push({ date: row[0], workType: row[3] });
+            }
+        });
+    }
+
     console.log(`✅ Loaded: ${Object.keys(employees).length} Employees`);
   } catch(e) { console.error(e); }
 }
@@ -116,25 +165,21 @@ function formatThaiDate() {
     const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()+543}`;
 }
-
-// ตรวจสอบช่วงเวลาทำธุรกรรม (พุธ/ศุกร์ 10:00 - 13:00)
 function isTransactionTime() {
     const d = new Date();
     const hour = d.getHours();
-    // 10:00 - 12:59
-    return hour >= 10 && hour < 13;
+    return hour >= 10 && hour < 13; // 10:00 - 12:59
 }
 
 /* ======================
    ⏰ CRON JOBS
 ====================== */
 
-// 1. จันทร์-เสาร์ 09:20 -> เตือน Check-in
+// 1. 09:20 -> เตือน Check-in (จันทร์-เสาร์)
 cron.schedule('20 9 * * 1-6', async () => { 
   const today = getToday();
   for (const uid in employees) {
     if (employees[uid].active) {
-      // เช็คว่าวันนี้มี record ใน checkinStore หรือยัง (ต้องปรับโครงสร้าง checkinStore เล็กน้อย)
       const hasCheckedIn = checkinStore[uid]?.find(r => r.date === today);
       if (!hasCheckedIn) {
         try { await client.pushMessage(uid, { type: 'text', text: `⚠️ อีก 10 นาทีปิด Check-in ครับ` }); } 
@@ -144,17 +189,38 @@ cron.schedule('20 9 * * 1-6', async () => {
   }
 }, { timezone: "Asia/Bangkok" });
 
-// 2. จันทร์-เสาร์ 09:45 -> รายงาน Admin (Check-in ประจำวัน)
+// 2. 09:45 -> รายงาน Admin (จันทร์-เสาร์)
 cron.schedule('45 9 * * 1-6', async () => {
-    // ... (Code เดิม - รายงานใครมาไม่มา) ...
-    // ขออนุญาตละไว้เพื่อความกระชับ (ใช้ code เดิมได้เลย)
+    const today = getToday();
+    let report = `📊 สรุปการลงเวลา\n${formatThaiDate()}\n------------------\n`;
+    let notCheckedIn = [];
+    let checkedIn = [];
+
+    for (const uid in employees) {
+        if (employees[uid].active) {
+            const record = checkinStore[uid]?.find(r => r.date === today);
+            if (record) {
+                let type = '✅ มาทำงาน';
+                if (record.workType.includes('half')) type = '⛅ ครึ่งวัน';
+                else if (record.workType.includes('off')) type = '🏠 หยุด';
+                checkedIn.push(`${employees[uid].name} : ${type}`);
+            } else {
+                notCheckedIn.push(`❌ ${employees[uid].name}`);
+            }
+        }
+    }
+    if (checkedIn.length > 0) report += checkedIn.join('\n') + '\n';
+    if (notCheckedIn.length > 0) report += `\n[ยังไม่เช็คอิน]\n` + notCheckedIn.join('\n');
+    else report += `\n(ครบทุกคน)`;
+
+    await client.pushMessage(process.env.ADMIN_USER_ID, { type: 'text', text: report }).catch(()=>{});
 }, { timezone: "Asia/Bangkok" });
 
 
 /* ============ 💰 FINANCE CRON JOBS ============ */
 
 // 3. พุธ 10:00 -> เปิดให้เบิกเงิน
-cron.schedule('0 10 * * 3', async () => { // 3 = Wednesday
+cron.schedule('0 10 * * 3', async () => { 
     for (const uid in employees) {
         if (!employees[uid].active) continue;
         await client.pushMessage(uid, {
@@ -172,26 +238,24 @@ cron.schedule('0 10 * * 3', async () => { // 3 = Wednesday
     }
 }, { timezone: "Asia/Bangkok" });
 
-// 4. พุธ 13:30 -> สรุปยอดเบิกให้ Admin
+// 4. พุธ 13:30 -> สรุปยอดเบิก
 cron.schedule('30 13 * * 3', async () => {
     let msg = `💸 สรุปยอดเบิกวันพุธ\n----------------\n`;
     let total = 0;
     for(const uid in weeklyTransactions.advance) {
-        const amount = weeklyTransactions.advance[uid];
-        const name = employees[uid]?.name || 'Unknown';
-        msg += `${name}: ${amount} บ.\n`;
-        total += amount;
+        msg += `${employees[uid]?.name || uid}: ${weeklyTransactions.advance[uid]} บ.\n`;
+        total += weeklyTransactions.advance[uid];
     }
-    msg += `----------------\nรวมทั้งสิ้น: ${total} บาท`;
+    msg += `----------------\nรวม: ${total} บาท`;
     await client.pushMessage(process.env.ADMIN_USER_ID, { type: 'text', text: msg });
 }, { timezone: "Asia/Bangkok" });
 
 // 5. ศุกร์ 10:00 -> เปิดให้จ่ายหนี้
-cron.schedule('0 10 * * 5', async () => { // 5 = Friday
+cron.schedule('0 10 * * 5', async () => { 
     for (const uid in employees) {
         if (!employees[uid].active) continue;
         const currentDebt = employees[uid].totalDebt || 0;
-        if (currentDebt <= 0) continue; // ไม่มีหนี้ไม่ต้องถาม
+        if (currentDebt <= 0) continue;
 
         await client.pushMessage(uid, {
             type: 'template',
@@ -208,71 +272,59 @@ cron.schedule('0 10 * * 5', async () => { // 5 = Friday
     }
 }, { timezone: "Asia/Bangkok" });
 
-// 6. ศุกร์ 13:30 -> สรุปยอดหักหนี้ให้ Admin
+// 6. ศุกร์ 13:30 -> สรุปยอดหักหนี้
 cron.schedule('30 13 * * 5', async () => {
     let msg = `📉 สรุปยอดหักหนี้วันศุกร์\n----------------\n`;
     let total = 0;
     for(const uid in weeklyTransactions.repayment) {
-        const amount = weeklyTransactions.repayment[uid];
-        const name = employees[uid]?.name || 'Unknown';
-        msg += `${name}: ${amount} บ.\n`;
-        total += amount;
+        msg += `${employees[uid]?.name || uid}: ${weeklyTransactions.repayment[uid]} บ.\n`;
+        total += weeklyTransactions.repayment[uid];
     }
-    msg += `----------------\nรวมทั้งสิ้น: ${total} บาท`;
+    msg += `----------------\nรวม: ${total} บาท`;
     await client.pushMessage(process.env.ADMIN_USER_ID, { type: 'text', text: msg });
 }, { timezone: "Asia/Bangkok" });
 
-// 7. เสาร์ 10:00 -> 📊 WEEKLY REPORT (Payroll)
-cron.schedule('0 10 * * 6', async () => { // 6 = Saturday
+// 7. เสาร์ 10:00 -> Payroll Report
+cron.schedule('0 10 * * 6', async () => { 
     let adminReport = `💰 รายงานสรุปค่าแรงประจำสัปดาห์\n${formatThaiDate()}\n=====================\n`;
     
     for (const uid in employees) {
         if (!employees[uid].active) continue;
 
         const emp = employees[uid];
-        // คำนวณวันทำงาน
         const userCheckins = checkinStore[uid] || [];
-        let fullDays = 0;
-        let halfDays = 0;
-        let workDaysCount = 0;
+        let fullDays = 0, halfDays = 0, workDaysCount = 0;
 
         userCheckins.forEach(c => {
             if(c.workType.includes('full')) { fullDays++; workDaysCount++; }
             else if(c.workType.includes('half')) { halfDays++; workDaysCount += 0.5; }
         });
 
-        // คำนวณเงิน
         const grossPay = workDaysCount * emp.dailyRate;
         const advance = weeklyTransactions.advance[uid] || 0;
         const debtPaid = weeklyTransactions.repayment[uid] || 0;
         const netPay = grossPay - advance - debtPaid;
-        const remainingDebt = Math.max(0, emp.totalDebt - debtPaid); // หนี้ที่เหลือในระบบ (Display Only)
+        const remainingDebt = emp.totalDebt; // หนี้ที่เหลือหลังจากหักวันศุกร์ไปแล้ว
 
-        // 1. สร้างสลิปส่งให้พนักงาน
+        // ส่งสลิป
         const slip = `🧾 สลิปเงินเดือน (Weekly)\nคุณ: ${emp.name}\n` +
-                     `-----------------------\n` +
                      `ทำงาน: ${fullDays} วันเต็ม, ${halfDays} ครึ่งวัน\n` +
                      `ค่าแรงรวม: ${grossPay.toLocaleString()} บ.\n` +
                      `หักเบิกวันพุธ: -${advance.toLocaleString()} บ.\n` +
                      `หักชำระหนี้: -${debtPaid.toLocaleString()} บ.\n` +
                      `-----------------------\n` +
-                     `💰 เงินสุทธิ: ${netPay.toLocaleString()} บาท\n` +
-                     `(หนี้คงเหลือโดยประมาณ: ${remainingDebt.toLocaleString()} บ.)`;
+                     `💰 รับสุทธิ: ${netPay.toLocaleString()} บาท\n` +
+                     `(หนี้คงเหลือ: ${remainingDebt.toLocaleString()} บ.)`;
         
         await client.pushMessage(uid, { type: 'text', text: slip }).catch(()=>{});
 
-        // 2. เติมข้อมูลลงรายงาน Admin
-        adminReport += `👤 ${emp.name}\n` +
-                       `   - งาน: ${workDaysCount} วัน (${grossPay})\n` +
-                       `   - หัก: เบิก ${advance} / หนี้ ${debtPaid}\n` +
-                       `   - จ่ายสุทธิ: ${netPay.toLocaleString()} บ.\n`;
+        // รายงาน Admin
+        adminReport += `👤 ${emp.name}\n   งาน: ${workDaysCount}วัน, จ่ายสุทธิ: ${netPay} บ.\n`;
     }
 
-    // ส่งหา Admin
     await client.pushMessage(process.env.ADMIN_USER_ID, { type: 'text', text: adminReport }).catch(()=>{});
-
-    // Reset Weekly Data
-    // checkinStore = {}; // (Optional: ถ้าต้องการเคลียร์ทุกวีค)
+    
+    // Reset Transaction รายสัปดาห์ (แต่ Checkin เก็บไว้ก่อนเผื่อดูย้อนหลัง)
     weeklyTransactions = { advance: {}, repayment: {} };
 
 }, { timezone: "Asia/Bangkok" });
@@ -285,22 +337,22 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
   try {
     for (const event of req.body.events) {
       const userId = event.source.userId;
-      const isAdmin = userId === process.env.ADMIN_USER_ID || admins[userId]?.active;
+      // Admin Check: เป็น Super Admin หรืออยู่ในรายชื่อ Admin Active
+      const isSuperAdmin = userId === process.env.ADMIN_USER_ID;
+      const isAdmin = isSuperAdmin || admins[userId]?.active;
       
-      // Handle Postback (กดปุ่ม Confirm)
+      // Handle Postback
       if (event.type === 'postback') {
           const data = event.postback.data;
           
-          // ขอเบิกเงิน (Step 1)
           if (data === 'req_advance:yes') {
              if (!isTransactionTime()) {
-                 await client.replyMessage(event.replyToken, { type: 'text', text: '❌ หมดเวลาเบิกเงินแล้วครับ (10:00-13:00)' });
+                 await client.replyMessage(event.replyToken, { type: 'text', text: '❌ หมดเวลาทำรายการแล้วครับ (10:00-13:00)' });
                  continue;
              }
              await client.replyMessage(event.replyToken, { type: 'text', text: 'กรุณาพิมพ์ยอดเงินที่ต้องการเบิก\nเช่น "berk:500"' });
           }
 
-          // ขอจ่ายหนี้ (Step 1)
           if (data === 'req_repayment:yes') {
              if (!isTransactionTime()) {
                  await client.replyMessage(event.replyToken, { type: 'text', text: '❌ หมดเวลาทำรายการแล้วครับ (10:00-13:00)' });
@@ -316,15 +368,78 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       const lower = text.toLowerCase();
       const today = getToday();
 
-      // ... (Code ส่วน add/remove employee/admin เดิม ใส่ตรงนี้) ...
-      // เพื่อความกระชับ ขอข้ามส่วน Admin Management เดิมไป (แต่ต้องมีนะ)
+      const profile = await client.getProfile(userId);
+      const name = profile.displayName;
+
+      /* ===== 0. Utility Commands ===== */
+      
+      // whoami
+      if (lower === 'whoami') {
+        let role = 'Guest';
+        if (isSuperAdmin) role = '👑 Super Admin';
+        else if (isAdmin) role = '🛡️ Admin';
+        else if (employees[userId]?.active) role = '💼 Employee';
+        
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `👤 ${name}\nID: ${userId}\nRole: ${role}`
+        });
+        continue;
+      }
+
+      // update data (New!)
+      if (lower === 'update data') {
+          if (!isAdmin) {
+              await client.replyMessage(event.replyToken, { type: 'text', text: '❌ Access Denied' });
+              continue;
+          }
+          await client.replyMessage(event.replyToken, { type: 'text', text: '🔄 กำลังดึงข้อมูลล่าสุดจาก Google Sheet...' });
+          await loadDataFromSheet();
+          await client.pushMessage(userId, { type: 'text', text: '✅ อัปเดตข้อมูลพนักงาน/การเงิน เรียบร้อยแล้วครับ!' });
+          continue;
+      }
+
+      // Admin Management (Add/Remove)
+      if (lower.startsWith('add employee')) {
+          if(!isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ Admin Only'}); continue; }
+          const [,,eid, ...n] = text.split(' ');
+          const ename = n.join(' ')||'Emp';
+          if(!eid) continue;
+          
+          employees[eid] = { name: ename, active: true, dailyRate: 0, totalDebt: 0 };
+          await saveToSheet('employee!A:G', [new Date().toLocaleString('th-TH'), eid, ename, 'active', userId, 0, 0]);
+          await client.replyMessage(event.replyToken, {type:'text', text:`✅ Added Employee: ${ename}\n(อย่าลืมไปใส่ค่าแรง/หนี้ใน Sheet และกด update data)`});
+          continue;
+      }
+      
+      if (lower.startsWith('remove employee')) {
+          if(!isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ Admin Only'}); continue; }
+          const [,,eid] = text.split(' ');
+          if(employees[eid]) {
+             employees[eid].active = false;
+             await saveToSheet('employee!A:G', [new Date().toLocaleString('th-TH'), eid, employees[eid].name, 'inactive', userId]);
+             await client.replyMessage(event.replyToken, {type:'text', text:`⛔ Removed: ${employees[eid].name}`});
+          }
+          continue;
+      }
+
+      if (lower.startsWith('add admin')) {
+          if(!isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ Admin Only'}); continue; }
+          const [,,aid, ...n] = text.split(' ');
+          const aname = n.join(' ')||'Admin';
+          if(!aid) continue;
+          
+          admins[aid] = { name: aname, active: true };
+          await saveToSheet('admin!A:E', [new Date().toLocaleString('th-TH'), aid, aname, 'active', userId]);
+          await client.replyMessage(event.replyToken, {type:'text', text:`🛡️ Added Admin: ${aname}`});
+          continue;
+      }
+
 
       /* ===== 1. Check-in Logic ===== */
       if (lower.startsWith('work:')) {
-         // เก็บเป็น Array เพื่อรองรับหลายวันใน 1 วีค
          if (!checkinStore[userId]) checkinStore[userId] = [];
          
-         // เช็คซ้ำวันเดิม
          const already = checkinStore[userId].find(r => r.date === today);
          if (already) {
              await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ วันนี้ลงเวลาไปแล้วครับ' });
@@ -332,18 +447,14 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
          }
 
          checkinStore[userId].push({ date: today, workType: lower });
-         
-         // Save to Sheet
-         const profile = await client.getProfile(userId);
-         await saveToSheet('checkin!A:E', [today, userId, profile.displayName, lower, new Date().toLocaleString('th-TH')]);
-         
+         await saveToSheet('checkin!A:E', [today, userId, name, lower, new Date().toLocaleString('th-TH')]);
          await client.replyMessage(event.replyToken, { type: 'text', text: '✅ บันทึกเวลาเรียบร้อย' });
          continue;
       }
       
       /* ===== 2. เบิกเงิน (Wednesday) ===== */
       if (lower.startsWith('berk:')) {
-          if (new Date().getDay() !== 3) { // 3=Wednesday
+          if (new Date().getDay() !== 3) { 
               await client.replyMessage(event.replyToken, { type: 'text', text: '❌ ระบบเบิกเปิดเฉพาะวันพุธครับ' });
               continue;
           }
@@ -359,16 +470,14 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           }
 
           weeklyTransactions.advance[userId] = amount;
-          const profile = await client.getProfile(userId);
-          await saveToSheet('advance!A:E', [today, userId, profile.displayName, amount, new Date().toLocaleString('th-TH')]);
-
+          await saveToSheet('advance!A:E', [today, userId, name, amount, new Date().toLocaleString('th-TH')]);
           await client.replyMessage(event.replyToken, { type: 'text', text: `✅ บันทึกยอดเบิก ${amount} บาท เรียบร้อย` });
           continue;
       }
 
-      /* ===== 3. จ่ายหนี้ (Friday) ===== */
+      /* ===== 3. จ่ายหนี้ (Friday) + Auto Update Sheet ===== */
       if (lower.startsWith('paydebt:')) {
-          if (new Date().getDay() !== 5) { // 5=Friday
+          if (new Date().getDay() !== 5) { 
               await client.replyMessage(event.replyToken, { type: 'text', text: '❌ ระบบตัดหนี้เปิดเฉพาะวันศุกร์ครับ' });
               continue;
           }
@@ -383,32 +492,55 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
               continue;
           }
 
-          // Optional: เช็คว่าจ่ายเกินหนี้ที่มีไหม
           const currentDebt = employees[userId]?.totalDebt || 0;
           if (amount > currentDebt) {
              await client.replyMessage(event.replyToken, { type: 'text', text: `⚠️ ยอดเกินหนี้ที่มี (${currentDebt} บ.) ครับ` });
              continue;
           }
 
-          weeklyTransactions.repayment[userId] = amount;
-          const profile = await client.getProfile(userId);
-          await saveToSheet('repayment!A:E', [today, userId, profile.displayName, amount, new Date().toLocaleString('th-TH')]);
+          // --- 🌟 LOGIC ใหม่: หักลบหนี้และอัปเดต Sheet ทันที ---
+          const newDebt = currentDebt - amount;
+          
+          // 1. Update Memory
+          if(employees[userId]) employees[userId].totalDebt = newDebt;
 
-          await client.replyMessage(event.replyToken, { type: 'text', text: `✅ บันทึกหักหนี้ ${amount} บาท เรียบร้อย` });
+          // 2. Save Transaction Log
+          weeklyTransactions.repayment[userId] = amount;
+          await saveToSheet('repayment!A:E', [today, userId, name, amount, new Date().toLocaleString('th-TH')]);
+
+          // 3. Update TotalDebt in Sheet
+          await updateDebtInSheet(userId, newDebt);
+
+          await client.replyMessage(event.replyToken, { 
+              type: 'text', 
+              text: `✅ บันทึกหักหนี้ ${amount} บาท เรียบร้อย\n📉 หนี้คงเหลือ: ${newDebt} บาท` 
+          });
           continue;
       }
       
       // ปุ่ม Checkin
       if (lower === 'checkin') {
-         // ... (Logic ปุ่ม Checkin เหมือนเดิม) ...
+         if (!isAdmin && !employees[userId]?.active) {
+            await client.replyMessage(event.replyToken, { type: 'text', text: '❌ คุณยังไม่ได้เป็นพนักงานในระบบ' });
+            continue;
+         }
+
+         // เช็คว่าลงหรือยัง
+         if (checkinStore[userId]?.find(r => r.date === today)) {
+             await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ วันนี้ลงเวลาไปแล้วครับ' });
+             continue;
+         }
+
+         if (isSunday()) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ วันอาทิตย์หยุดครับ'}); continue; }
+         if (isAfter0930() && !isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'⛔ สายแล้วครับ (ปิด 09:30)'}); continue; }
+
          const thaiDate = formatThaiDate();
-         const profile = await client.getProfile(userId);
          await client.replyMessage(event.replyToken, {
           type: 'template',
           altText: 'Check-in',
           template: {
             type: 'buttons',
-            text: `${thaiDate}\n${profile.displayName} ทำงานแบบไหนครับ?`,
+            text: `${thaiDate}\n${name} ทำงานแบบไหนครับ?`,
             actions: [
               { label: 'เต็มวัน', type: 'message', text: 'work:full' },
               { label: 'ครึ่งเช้า', type: 'message', text: 'work:half-morning' },
@@ -419,8 +551,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         });
       }
 
-    } // end for loop
-
+    } 
     res.sendStatus(200);
   } catch (e) {
     console.error(e);
