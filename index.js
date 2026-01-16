@@ -4,52 +4,72 @@ const { google } = require('googleapis');
 const cron = require('node-cron');
 
 /* ======================
-   Google Auth
+   ENV
 ====================== */
-const auth = new google.auth.JWT({
-  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
+const {
+  CHANNEL_ACCESS_TOKEN,
+  CHANNEL_SECRET,
+  ADMIN_USER_ID,
+  GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  GOOGLE_PRIVATE_KEY,
+  SPREADSHEET_ID,
+} = process.env;
 
-async function getSheets() {
+/* ======================
+   Google Sheets Auth
+====================== */
+const auth = new google.auth.JWT(
+  GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  null,
+  GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  ['https://www.googleapis.com/auth/spreadsheets']
+);
+
+async function sheets() {
   await auth.authorize();
   return google.sheets({ version: 'v4', auth });
 }
 
 /* ======================
-   Helpers
+   Utils
 ====================== */
-function today() {
-  return new Date().toISOString().split('T')[0];
+function todayTH() {
+  const d = new Date();
+  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
 }
-function isSunday(d = new Date()) {
-  return d.getDay() === 0;
+
+function isSundayTH() {
+  return new Date().toLocaleDateString('en-US', { timeZone:'Asia/Bangkok', weekday:'short' }) === 'Sun';
 }
-function isSaturday(d = new Date()) {
-  return d.getDay() === 6;
-}
-function formatThaiDate(d = new Date()) {
-  return `${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()+543}`;
+
+function thaiDate() {
+  const d = new Date();
+  return d.toLocaleDateString('th-TH', {
+    timeZone: 'Asia/Bangkok',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
 }
 
 /* ======================
-   Sheet Operations
+   Sheet helpers
 ====================== */
-async function appendRow(sheet, range, values) {
-  const sheets = await getSheets();
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.SPREADSHEET_ID,
+async function append(range, values) {
+  const s = await sheets();
+  await s.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
     range,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [values] },
   });
 }
 
-async function readSheet(range) {
-  const sheets = await getSheets();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.SPREADSHEET_ID,
+async function read(range) {
+  const s = await sheets();
+  const res = await s.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
     range,
   });
   return res.data.values || [];
@@ -59,7 +79,7 @@ async function readSheet(range) {
    Employee
 ====================== */
 async function getEmployees() {
-  const rows = await readSheet('employee!A2:D');
+  const rows = await read('employee!A2:D');
   return rows.map(r => ({
     userId: r[0],
     name: r[1],
@@ -68,9 +88,9 @@ async function getEmployees() {
 }
 
 async function ensureEmployee(userId, name) {
-  const employees = await getEmployees();
-  if (!employees.find(e => e.userId === userId)) {
-    await appendRow('employee!A:D', [
+  const list = await getEmployees();
+  if (!list.find(e => e.userId === userId)) {
+    await append('employee!A:D', [
       userId,
       name,
       'active',
@@ -82,12 +102,17 @@ async function ensureEmployee(userId, name) {
 /* ======================
    Check-in
 ====================== */
-async function saveCheckin({ userId, name, workType }) {
-  await appendRow('checkin!A:E', [
-    today(),
+async function hasCheckedToday(userId) {
+  const rows = await read('checkin!A2:B');
+  return rows.some(r => r[0] === todayTH() && r[1] === userId);
+}
+
+async function saveCheckin(userId, name, type) {
+  await append('checkin!A:E', [
+    todayTH(),
     userId,
     name,
-    workType,
+    type,
     new Date().toLocaleString('th-TH'),
   ]);
 }
@@ -96,119 +121,92 @@ async function saveCheckin({ userId, name, workType }) {
    LINE Setup
 ====================== */
 const app = express();
-const config = {
-  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.CHANNEL_SECRET,
-};
-const client = new line.Client(config);
+const client = new line.Client({
+  channelAccessToken: CHANNEL_ACCESS_TOKEN,
+  channelSecret: CHANNEL_SECRET,
+});
 
 /* ======================
    Webhook
 ====================== */
-app.post('/webhook', line.middleware(config), async (req, res) => {
-  for (const event of req.body.events) {
-    if (event.type !== 'message' || event.message.type !== 'text') continue;
+app.post('/webhook', line.middleware({
+  channelAccessToken: CHANNEL_ACCESS_TOKEN,
+  channelSecret: CHANNEL_SECRET,
+}), async (req, res) => {
+  try {
+    for (const event of req.body.events) {
+      if (event.type !== 'message' || event.message.type !== 'text') continue;
 
-    const userId = event.source.userId;
-    const text = event.message.text.toLowerCase().trim();
-    const isAdmin = userId === process.env.ADMIN_USER_ID;
-    const profile = await client.getProfile(userId);
-    const name = profile.displayName;
+      const userId = event.source.userId;
+      const text = event.message.text.toLowerCase().trim();
+      const profile = await client.getProfile(userId);
+      const name = profile.displayName;
 
-    if (text === 'checkin') {
-      await ensureEmployee(userId, name);
-      if (isSunday()) {
-        await client.replyMessage(event.replyToken,{ type:'text', text:'❌ วันอาทิตย์ไม่ต้อง check-in' });
-        continue;
+      if (text === 'checkin') {
+        if (isSundayTH())
+          return client.replyMessage(event.replyToken,{ type:'text', text:'❌ วันอาทิตย์ไม่ต้อง check-in' });
+
+        if (await hasCheckedToday(userId))
+          return client.replyMessage(event.replyToken,{ type:'text', text:'⚠️ วันนี้คุณ check-in แล้ว' });
+
+        await ensureEmployee(userId, name);
+
+        return client.replyMessage(event.replyToken,{
+          type:'template',
+          altText:'เลือกประเภทงาน',
+          template:{
+            type:'buttons',
+            text:`${thaiDate()}\n${name}`,
+            actions:[
+              { label:'เต็มวัน', type:'message', text:'work:full' },
+              { label:'ครึ่งวันเช้า', type:'message', text:'work:half-morning' },
+              { label:'ครึ่งวันบ่าย', type:'message', text:'work:half-afternoon' },
+              { label:'หยุด', type:'message', text:'work:off' },
+            ],
+          },
+        });
       }
 
-      await client.replyMessage(event.replyToken,{
-        type:'template',
-        altText:'เลือกประเภทงาน',
-        template:{
-          type:'buttons',
-          text:`${formatThaiDate()}\n${name}`,
-          actions:[
-            { label:'เต็มวัน', type:'message', text:'work:full' },
-            { label:'ครึ่งวันเช้า', type:'message', text:'work:half-morning' },
-            { label:'ครึ่งวันบ่าย', type:'message', text:'work:half-afternoon' },
-            { label:'หยุด', type:'message', text:'work:off' },
-          ],
-        },
-      });
+      if (text.startsWith('work:')) {
+        await saveCheckin(userId, name, text);
+        return client.replyMessage(event.replyToken,{
+          type:'text',
+          text:`✅ บันทึกเรียบร้อย\n${name}`,
+        });
+      }
     }
-
-    if (text.startsWith('work:')) {
-      await saveCheckin({ userId, name, workType: text });
-      await client.replyMessage(event.replyToken,{
-        type:'text',
-        text:`✅ บันทึกสำเร็จ\n${name}`,
-      });
-    }
-
-    if (text.startsWith('add ') && isAdmin) {
-      const targetId = text.replace('add ','');
-      await appendRow('employee!A:D',[targetId,'','active',new Date().toISOString()]);
-      await client.replyMessage(event.replyToken,{ type:'text', text:'✅ เพิ่ม employee แล้ว' });
-    }
+    res.sendStatus(200);
+  } catch (err) {
+    console.error(err);
+    res.sendStatus(500);
   }
-  res.sendStatus(200);
 });
 
 /* ======================
-   ⏰ CRON JOBS
+   CRON
 ====================== */
 
-/* 09:20 Reminder */
+// 🔔 09:20 reminder
 cron.schedule('20 9 * * 1-6', async () => {
   const employees = await getEmployees();
-  const checkins = await readSheet('checkin!A2:B');
-  const todayChecked = checkins.filter(r => r[0] === today()).map(r => r[1]);
-
   for (const e of employees) {
-    if (e.status === 'active' && !todayChecked.includes(e.userId)) {
-      await client.pushMessage(e.userId,{
-        type:'text',
-        text:'⏰ อีก 10 นาทีระบบ check-in จะปิด',
-      });
+    if (e.status === 'active' && !(await hasCheckedToday(e.userId))) {
+      await client.pushMessage(e.userId,{ type:'text', text:'⏰ อีก 10 นาทีระบบจะปิด check-in' });
     }
   }
-});
+}, { timezone:'Asia/Bangkok' });
 
-/* 09:45 Daily Report */
+// 📊 09:45 daily report
 cron.schedule('45 9 * * 1-6', async () => {
-  const checkins = await readSheet('checkin!A2:D');
-  const todayData = checkins.filter(r => r[0] === today());
-  let msg = '📋 Daily Report\n';
-
-  todayData.forEach(r => {
-    msg += `• ${r[2]} — ${r[3]}\n`;
-  });
-
-  await client.pushMessage(process.env.ADMIN_USER_ID,{ type:'text', text: msg });
-});
-
-/* Saturday 10:00 Weekly Summary */
-cron.schedule('0 10 * * 6', async () => {
-  const rows = await readSheet('checkin!A2:D');
-  const map = {};
-
-  rows.forEach(r => {
-    if (isSunday(new Date(r[0]))) return;
-    const v = r[3].includes('full') ? 1 : r[3].includes('half') ? 0.5 : 0;
-    map[r[2]] = (map[r[2]] || 0) + v;
-  });
-
-  let msg = '📊 Weekly Summary\n';
-  Object.entries(map).forEach(([name, days]) => {
-    msg += `• ${name}: ${days} วัน\n`;
-  });
-
-  await client.pushMessage(process.env.ADMIN_USER_ID,{ type:'text', text: msg });
-});
+  const rows = await read('checkin!A2:D');
+  const todayRows = rows.filter(r => r[0] === todayTH());
+  let msg = `📊 Daily Report\n${thaiDate()}\n\n`;
+  todayRows.forEach(r => msg += `• ${r[2]} — ${r[3]}\n`);
+  await client.pushMessage(ADMIN_USER_ID,{ type:'text', text: msg });
+}, { timezone:'Asia/Bangkok' });
 
 /* ======================
-   Health
+   Server
 ====================== */
-app.get('/',(_,res)=>res.send('LINE Bot running 🚀'));
-app.listen(process.env.PORT||3000);
+app.get('/',(_,res)=>res.send('OK'));
+app.listen(process.env.PORT || 3000);
