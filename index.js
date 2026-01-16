@@ -6,30 +6,41 @@ const { google } = require('googleapis');
 /* ======================
    Google Sheets
 ====================== */
-const auth = new google.auth.JWT(
-  process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  null,
-  process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  ['https://www.googleapis.com/auth/spreadsheets']
-);
-
-const sheets = google.sheets({ version: 'v4', auth });
+const auth = new google.auth.JWT({
+  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
 
 async function saveCheckinToSheet({ date, userId, name, workType }) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.SPREADSHEET_ID,
-    range: 'checkin!A:E',
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [[
-        date,
-        userId,
-        name,
-        workType,
-        new Date().toLocaleString('th-TH'),
-      ]],
-    },
-  });
+  try {
+    // 🔑 สำคัญมาก: ต้อง authorize ก่อน
+    await auth.authorize();
+
+    const sheets = google.sheets({
+      version: 'v4',
+      auth,
+    });
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: 'checkin!A:E',
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[
+          date,
+          userId,
+          name,
+          workType,
+          new Date().toLocaleString('th-TH'),
+        ]],
+      },
+    });
+  } catch (err) {
+    console.error('❌ GOOGLE SHEET ERROR');
+    console.error(err.response?.data || err.message);
+    throw err;
+  }
 }
 
 /* ======================
