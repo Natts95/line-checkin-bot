@@ -37,9 +37,6 @@ async function saveCheckinToSheet({ date, userId, name, workType }) {
 ====================== */
 const app = express();
 
-/* ❌ ห้ามใช้ bodyParser.json() */
-/* ❌ app.use(bodyParser.json()); */
-
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.CHANNEL_SECRET,
@@ -51,6 +48,8 @@ const client = new line.Client(config);
    Memory Store
 ====================== */
 const checkinStore = {};
+const employees = {}; 
+// structure: { userId: { name, active:true } }
 
 /* ======================
    Helpers
@@ -87,22 +86,94 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       if (event.type !== 'message' || event.message.type !== 'text') continue;
 
       const userId = event.source.userId;
-      const text = event.message.text.toLowerCase().trim();
+      const text = event.message.text.trim();
+      const lower = text.toLowerCase();
       const today = getToday();
       const thaiDate = formatThaiDate();
+
+      const isAdmin = userId === process.env.ADMIN_USER_ID;
 
       const profile = await client.getProfile(userId);
       const name = profile.displayName;
 
-      if (text === 'whoami') {
+      /* ===== whoami ===== */
+      if (lower === 'whoami') {
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `👤 ${name}\nuserId:\n${userId}`,
+          text: `👤 ${name}\nuserId:\n${userId}\nrole: ${isAdmin ? 'admin' : (employees[userId]?.active ? 'employee' : 'guest')}`,
         });
         continue;
       }
 
-      if (text === 'checkin') {
+      /* ===== ADMIN: add employee ===== */
+      if (lower.startsWith('add employee')) {
+        if (!isAdmin) {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '❌ คำสั่งนี้สำหรับ admin เท่านั้น',
+          });
+          continue;
+        }
+
+        const [, , empId, ...empName] = text.split(' ');
+        if (!empId) {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '⚠️ ใช้คำสั่ง: add employee <userId> <name>',
+          });
+          continue;
+        }
+
+        employees[empId] = {
+          name: empName.join(' ') || 'Employee',
+          active: true,
+        };
+
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `✅ เพิ่ม employee สำเร็จ\n${employees[empId].name}`,
+        });
+        continue;
+      }
+
+      /* ===== ADMIN: remove employee ===== */
+      if (lower.startsWith('remove employee')) {
+        if (!isAdmin) {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '❌ คำสั่งนี้สำหรับ admin เท่านั้น',
+          });
+          continue;
+        }
+
+        const [, , empId] = text.split(' ');
+        if (!employees[empId]) {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '⚠️ ไม่พบ employee นี้ในระบบ',
+          });
+          continue;
+        }
+
+        employees[empId].active = false;
+
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `⛔ ปิดสถานะ employee แล้ว`,
+        });
+        continue;
+      }
+
+      /* ===== checkin ===== */
+      if (lower === 'checkin') {
+        if (!isAdmin && !employees[userId]?.active) {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '❌ คุณยังไม่ได้เป็น employee ในระบบ',
+          });
+          continue;
+        }
+
         if (isSunday()) {
           await client.replyMessage(event.replyToken, {
             type: 'text',
@@ -111,7 +182,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           continue;
         }
 
-        if (isAfter0930()) {
+        if (isAfter0930() && !isAdmin) {
           await client.replyMessage(event.replyToken, {
             type: 'text',
             text: '⛔ ระบบปิด check-in แล้ว (หลัง 09:30)',
@@ -136,14 +207,15 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         continue;
       }
 
-      if (text.startsWith('work:')) {
-        checkinStore[userId] = { date: today, workType: text };
+      /* ===== work result ===== */
+      if (lower.startsWith('work:')) {
+        checkinStore[userId] = { date: today, workType: lower };
 
         await saveCheckinToSheet({
           date: today,
           userId,
           name,
-          workType: text,
+          workType: lower,
         });
 
         await client.replyMessage(event.replyToken, {
