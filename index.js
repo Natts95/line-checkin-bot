@@ -49,7 +49,7 @@ const client = new line.Client(config);
 ====================== */
 const checkinStore = {};
 const employees = {}; 
-// structure: { userId: { name, active:true } }
+// { userId: { name, active:true } }
 
 /* ======================
    Helpers
@@ -100,7 +100,9 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       if (lower === 'whoami') {
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `👤 ${name}\nuserId:\n${userId}\nrole: ${isAdmin ? 'admin' : (employees[userId]?.active ? 'employee' : 'guest')}`,
+          text: `👤 ${name}\nuserId:\n${userId}\nrole: ${
+            isAdmin ? 'admin' : (employees[userId]?.active ? 'employee' : 'guest')
+          }`,
         });
         continue;
       }
@@ -209,19 +211,39 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
       /* ===== work result ===== */
       if (lower.startsWith('work:')) {
-        checkinStore[userId] = { date: today, workType: lower };
+        if (!isAdmin && !employees[userId]?.active) {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '❌ คุณไม่มีสิทธิ์ check-in',
+          });
+          continue;
+        }
 
-        await saveCheckinToSheet({
-          date: today,
-          userId,
-          name,
-          workType: lower,
-        });
+        try {
+          checkinStore[userId] = { date: today, workType: lower };
 
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${name}`,
-        });
+          await saveCheckinToSheet({
+            date: today,
+            userId,
+            name,
+            workType: lower,
+          });
+
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${name}`,
+          });
+
+        } catch (err) {
+          console.error('CHECKIN SAVE ERROR:', err);
+
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '⚠️ บันทึกไม่สำเร็จ (Google Sheet)\nกรุณาแจ้งแอดมิน',
+          });
+        }
+
+        continue;
       }
     }
 
