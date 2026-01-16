@@ -130,7 +130,6 @@ const client = new line.Client({
    Webhook
 ====================== */
 app.post('/webhook', line.middleware({
-  channelAccessToken: CHANNEL_ACCESS_TOKEN,
   channelSecret: CHANNEL_SECRET,
 }), async (req, res) => {
   try {
@@ -139,19 +138,41 @@ app.post('/webhook', line.middleware({
 
       const userId = event.source.userId;
       const text = event.message.text.toLowerCase().trim();
-      const profile = await client.getProfile(userId);
-      const name = profile.displayName;
+
+      let name = 'Unknown';
+      try {
+        const profile = await client.getProfile(userId);
+        name = profile.displayName;
+      } catch {}
+
+      if (text === 'whoami') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `👤 ${name}\n${userId}`,
+        });
+        continue;
+      }
 
       if (text === 'checkin') {
-        if (isSundayTH())
-          return client.replyMessage(event.replyToken,{ type:'text', text:'❌ วันอาทิตย์ไม่ต้อง check-in' });
+        if (isSundayTH()) {
+          await client.replyMessage(event.replyToken,{
+            type:'text',
+            text:'❌ วันอาทิตย์ไม่ต้อง check-in',
+          });
+          continue;
+        }
 
-        if (await hasCheckedToday(userId))
-          return client.replyMessage(event.replyToken,{ type:'text', text:'⚠️ วันนี้คุณ check-in แล้ว' });
+        if (await hasCheckedToday(userId)) {
+          await client.replyMessage(event.replyToken,{
+            type:'text',
+            text:'⚠️ วันนี้คุณ check-in แล้ว',
+          });
+          continue;
+        }
 
         await ensureEmployee(userId, name);
 
-        return client.replyMessage(event.replyToken,{
+        await client.replyMessage(event.replyToken,{
           type:'template',
           altText:'เลือกประเภทงาน',
           template:{
@@ -165,19 +186,21 @@ app.post('/webhook', line.middleware({
             ],
           },
         });
+        continue;
       }
 
       if (text.startsWith('work:')) {
         await saveCheckin(userId, name, text);
-        return client.replyMessage(event.replyToken,{
+        await client.replyMessage(event.replyToken,{
           type:'text',
           text:`✅ บันทึกเรียบร้อย\n${name}`,
         });
       }
     }
+
     res.sendStatus(200);
   } catch (err) {
-    console.error(err);
+    console.error('Webhook error:', err);
     res.sendStatus(500);
   }
 });
