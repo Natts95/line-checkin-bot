@@ -3,19 +3,24 @@ const line = require('@line/bot-sdk');
 const { google } = require('googleapis');
 
 /* ======================
-   Google Sheets
+   Google Sheets (FIXED)
 ====================== */
-const auth = new google.auth.JWT(
-  process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  null,
-  process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  ['https://www.googleapis.com/auth/spreadsheets']
-);
-
-const sheets = google.sheets({ version: 'v4', auth });
+const auth = new google.auth.JWT({
+  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
 
 async function saveCheckinToSheet({ date, userId, name, workType }) {
   try {
+    // 🔑 สำคัญมาก: ต้อง authorize ก่อน
+    await auth.authorize();
+
+    const sheets = google.sheets({
+      version: 'v4',
+      auth,
+    });
+
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.SPREADSHEET_ID,
       range: 'checkin!A:E',
