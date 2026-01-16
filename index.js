@@ -228,7 +228,7 @@ cron.schedule('0 10 * * 3', async () => {
             altText: 'ต้องการเบิกเงินวันนี้ไหมครับ?',
             template: {
                 type: 'confirm',
-                text: `💸 วันพุธแล้ว ต้องการ "เบิกเงินล่วงหน้า" ไหมครับ?\n(หมดเขต 13:00 น.)`,
+                text: `💸 วันพุธแล้ว ต้องการ "เบิกเงินล่วงหน้า" ไหมครับ?\n(หมดเวลา 13:00 น.)`,
                 actions: [
                     { label: 'ต้องการ', type: 'postback', data: 'req_advance:yes' },
                     { label: 'ไม่ต้องการ', type: 'message', text: 'ไม่เบิกครับ' }
@@ -442,13 +442,13 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
          
          const already = checkinStore[userId].find(r => r.date === today);
          if (already) {
-             await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ วันนี้ลงเวลาไปแล้วครับ' });
+             await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ วันนี้คุณ${emp.name}ลงเวลาไปแล้วครับ' });
              continue;
          }
 
          checkinStore[userId].push({ date: today, workType: lower });
          await saveToSheet('checkin!A:E', [today, userId, name, lower, new Date().toLocaleString('th-TH')]);
-         await client.replyMessage(event.replyToken, { type: 'text', text: '✅ บันทึกเวลาเรียบร้อย' });
+         await client.replyMessage(event.replyToken, { type: 'text', text: '✅ บันทึกเวลาของคุณ${emp.name}เรียบร้อยครับ' });
          continue;
       }
       
@@ -478,7 +478,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       /* ===== 3. จ่ายหนี้ (Friday) + Auto Update Sheet ===== */
       if (lower.startsWith('paydebt:')) {
           if (new Date().getDay() !== 5) { 
-              await client.replyMessage(event.replyToken, { type: 'text', text: '❌ ระบบตัดหนี้เปิดเฉพาะวันศุกร์ครับ' });
+              await client.replyMessage(event.replyToken, { type: 'text', text: '❌ ระบบหักหนี้เปิดเฉพาะวันศุกร์ครับ' });
               continue;
           }
           if (!isTransactionTime()) {
@@ -494,7 +494,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
           const currentDebt = employees[userId]?.totalDebt || 0;
           if (amount > currentDebt) {
-             await client.replyMessage(event.replyToken, { type: 'text', text: `⚠️ ยอดเกินหนี้ที่มี (${currentDebt} บ.) ครับ` });
+             await client.replyMessage(event.replyToken, { type: 'text', text: `⚠️ ยอดเกินหนี้ที่มี (${currentDebt} บาท) ครับ` });
              continue;
           }
 
@@ -521,18 +521,18 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       // ปุ่ม Checkin
       if (lower === 'checkin') {
          if (!isAdmin && !employees[userId]?.active) {
-            await client.replyMessage(event.replyToken, { type: 'text', text: '❌ คุณยังไม่ได้เป็นพนักงานในระบบ' });
+            await client.replyMessage(event.replyToken, { type: 'text', text: '❌ คุณยังไม่ได้เป็นพนักงานในระบบ\nกรุณาติดต่อ admin' });
             continue;
          }
 
          // เช็คว่าลงหรือยัง
          if (checkinStore[userId]?.find(r => r.date === today)) {
-             await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ วันนี้ลงเวลาไปแล้วครับ' });
+             await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ วันนี้คุณ${emp.name}ลงเวลาไปแล้วครับ' });
              continue;
          }
 
-         if (isSunday()) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ วันอาทิตย์หยุดครับ'}); continue; }
-         if (isAfter0930() && !isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'⛔ สายแล้วครับ (ปิด 09:30)'}); continue; }
+         if (isSunday()) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ คุณ${emp.name}\nวันอาทิตย์วันหยุดครับ'}); continue; }
+         if (isAfter0930() && !isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'⛔ ${emp.name}\nสายแล้วครับ (ระบบปิด 09:30)'}); continue; }
 
          const thaiDate = formatThaiDate();
          await client.replyMessage(event.replyToken, {
