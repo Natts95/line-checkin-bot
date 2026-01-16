@@ -160,7 +160,7 @@ function formatThaiDate() { /* ...เหมือนเดิม... */
 ====================== */
 
 // 1. 09:20 -> เตือนคนยังไม่เช็คอิน
-cron.schedule('20 9 * * 1-5', async () => { // จันทร์-ศุกร์ เวลา 09:20
+cron.schedule('20 9 * * 1-6', async () => { // จันทร์-ศุกร์ เวลา 09:20
   console.log('⏰ Cron 09:20: Sending alerts...');
   const today = getToday();
   
@@ -181,7 +181,7 @@ cron.schedule('20 9 * * 1-5', async () => { // จันทร์-ศุกร�
 }, { timezone: "Asia/Bangkok" });
 
 // 2. 09:45 -> ส่งสรุปรายงานประจำวัน
-cron.schedule('45 9 * * 1-5', async () => {
+cron.schedule('45 9 * * 1-6', async () => {
   console.log('⏰ Cron 09:45: Sending report...');
   const today = getToday();
   const dateStr = formatThaiDate();
