@@ -37,8 +37,7 @@ async function saveCheckinToSheet({ date, userId, name, workType }) {
    Express + LINE
 ====================== */
 const app = express();
-
-app.use(bodyParser.json()); // ✅ สำคัญมาก
+app.use(bodyParser.json());
 
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
@@ -50,7 +49,17 @@ const client = new line.Client(config);
 /* ======================
    Memory Store
 ====================== */
-const checkinStore = {};
+const checkinStore = {};   // check-in วันนี้
+const employeeStore = {}; // employee ที่อนุญาต
+
+/*
+employeeStore = {
+  userId: {
+    name: 'Nat',
+    active: true
+  }
+}
+*/
 
 /* ======================
    Helpers
@@ -91,7 +100,7 @@ cron.schedule('0 9 * * *', async () => {
   const today = getToday();
   const thaiDate = formatThaiDate();
 
-  for (const userId in checkinStore) {
+  for (const userId in employeeStore) {
     if (hasNotCheckedInToday(userId, today)) {
       try {
         const profile = await client.getProfile(userId);
@@ -112,10 +121,9 @@ cron.schedule('20 9 * * *', async () => {
   const today = getToday();
   const thaiDate = formatThaiDate();
 
-  for (const userId in checkinStore) {
+  for (const userId in employeeStore) {
     if (hasNotCheckedInToday(userId, today)) {
       try {
-        const profile = await client.getProfile(userId);
         await client.pushMessage(userId, {
           type: 'text',
           text: `⚠️ แจ้งเตือนครั้งสุดท้าย (09:20)\n${thaiDate}\nระบบจะปิด check-in เวลา 09:30`,
@@ -141,11 +149,10 @@ cron.schedule('45 9 * * *', async () => {
   let checkedIn = [];
   let notCheckedIn = [];
 
-  for (const userId in checkinStore) {
-    const profile = await client.getProfile(userId);
-    const name = profile.displayName;
+  for (const userId in employeeStore) {
+    const name = employeeStore[userId].name;
 
-    if (checkinStore[userId].date === today) {
+    if (checkinStore[userId]?.date === today) {
       checkedIn.push(`• ${name}`);
     } else {
       notCheckedIn.push(`• ${name}`);
@@ -181,6 +188,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       const profile = await client.getProfile(userId);
       const name = profile.displayName;
 
+      /* ===== whoami ===== */
       if (text === 'whoami') {
         await client.replyMessage(event.replyToken, {
           type: 'text',
@@ -189,12 +197,63 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
         continue;
       }
 
+      /* ===== add employee ===== */
+      if (text.startsWith('addemployee')) {
+        const adminId = process.env.ADMIN_USER_ID;
+        if (userId !== adminId) {
+          await client.replyMessage(event.replyToken,{
+            type:'text',
+            text:'❌ คำสั่งนี้สำหรับแอดมินเท่านั้น'
+          });
+          continue;
+        }
+
+        const parts = event.message.text.split(' ');
+        if (parts.length < 3) {
+          await client.replyMessage(event.replyToken,{
+            type:'text',
+            text:'รูปแบบ: addemployee USER_ID NAME'
+          });
+          continue;
+        }
+
+        const empUserId = parts[1];
+        const empName = parts.slice(2).join(' ');
+
+        employeeStore[empUserId] = {
+          name: empName,
+          active: true,
+        };
+
+        await client.replyMessage(event.replyToken,{
+          type:'text',
+          text:`✅ เพิ่ม employee สำเร็จ\n${empName}`
+        });
+        continue;
+      }
+
+      /* ===== checkin ===== */
       if (text === 'checkin') {
+
+        if (!employeeStore[userId]) {
+          await client.replyMessage(event.replyToken,{
+            type:'text',
+            text:'❌ คุณยังไม่มีสิทธิ์ใช้งานระบบ\nกรุณาติดต่อแอดมิน'
+          });
+          continue;
+        }
+
         if (isSunday())
-          return client.replyMessage(event.replyToken,{ type:'text', text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ' });
+          return client.replyMessage(event.replyToken,{
+            type:'text',
+            text:'❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ'
+          });
 
         if (isAfter0930())
-          return client.replyMessage(event.replyToken,{ type:'text', text:'⛔ ระบบปิด check-in แล้ว (หลัง 09:30)' });
+          return client.replyMessage(event.replyToken,{
+            type:'text',
+            text:'⛔ ระบบปิด check-in แล้ว (หลัง 09:30)'
+          });
 
         await client.replyMessage(event.replyToken, {
           type: 'template',
@@ -210,9 +269,13 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
             ],
           },
         });
+        continue;
       }
 
+      /* ===== save work ===== */
       if (text.startsWith('work:')) {
+        if (!employeeStore[userId]) continue;
+
         checkinStore[userId] = { date: today, workType: text };
 
         await saveCheckinToSheet({
