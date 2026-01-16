@@ -1,6 +1,5 @@
 const express = require('express');
 const line = require('@line/bot-sdk');
-const cron = require('node-cron');
 const { google } = require('googleapis');
 
 /* ======================
@@ -16,20 +15,26 @@ const auth = new google.auth.JWT(
 const sheets = google.sheets({ version: 'v4', auth });
 
 async function saveCheckinToSheet({ date, userId, name, workType }) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.SPREADSHEET_ID,
-    range: 'checkin!A:E',
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [[
-        date,
-        userId,
-        name,
-        workType,
-        new Date().toLocaleString('th-TH'),
-      ]],
-    },
-  });
+  try {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: 'checkin!A:E',
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[
+          date,
+          userId,
+          name,
+          workType,
+          new Date().toLocaleString('th-TH'),
+        ]],
+      },
+    });
+  } catch (err) {
+    console.error('❌ GOOGLE SHEET ERROR');
+    console.error(err.response?.data || err.message);
+    throw err;
+  }
 }
 
 /* ======================
@@ -45,11 +50,12 @@ const config = {
 const client = new line.Client(config);
 
 /* ======================
-   Memory Store
+   Memory
 ====================== */
 const checkinStore = {};
-const employees = {}; 
-// { userId: { name, active:true } }
+const employees = {
+  'U9f3cd3d1de967058e10642695e305241': { name: 'Nat', active: true },
+};
 
 /* ======================
    Helpers
@@ -57,24 +63,16 @@ const employees = {};
 function getToday() {
   return new Date().toISOString().split('T')[0];
 }
-
 function isSunday() {
   return new Date().getDay() === 0;
 }
-
 function isAfter0930() {
   const d = new Date();
   return d.getHours() > 9 || (d.getHours() === 9 && d.getMinutes() >= 30);
 }
-
 function formatThaiDate() {
   const d = new Date();
-  const days = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
-  const months = [
-    'มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน',
-    'กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม',
-  ];
-  return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear() + 543}`;
+  return `วันที่ ${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()+543}`;
 }
 
 /* ======================
@@ -86,170 +84,72 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       if (event.type !== 'message' || event.message.type !== 'text') continue;
 
       const userId = event.source.userId;
-      const text = event.message.text.trim();
-      const lower = text.toLowerCase();
-      const today = getToday();
-      const thaiDate = formatThaiDate();
-
+      const text = event.message.text.trim().toLowerCase();
       const isAdmin = userId === process.env.ADMIN_USER_ID;
 
       const profile = await client.getProfile(userId);
       const name = profile.displayName;
 
-      /* ===== whoami ===== */
-      if (lower === 'whoami') {
+      if (text === 'whoami') {
         await client.replyMessage(event.replyToken, {
           type: 'text',
-          text: `👤 ${name}\nuserId:\n${userId}\nrole: ${
-            isAdmin ? 'admin' : (employees[userId]?.active ? 'employee' : 'guest')
-          }`,
+          text: `👤 ${name}\n${isAdmin ? 'admin' : 'employee'}`,
         });
         continue;
       }
 
-      /* ===== ADMIN: add employee ===== */
-      if (lower.startsWith('add employee')) {
-        if (!isAdmin) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '❌ คำสั่งนี้สำหรับ admin เท่านั้น',
-          });
-          continue;
-        }
+      if (text === 'checkin') {
+        if (!isAdmin && !employees[userId]?.active)
+          return client.replyMessage(event.replyToken,{ type:'text', text:'❌ คุณไม่ใช่ employee' });
 
-        const [, , empId, ...empName] = text.split(' ');
-        if (!empId) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '⚠️ ใช้คำสั่ง: add employee <userId> <name>',
-          });
-          continue;
-        }
+        if (isSunday())
+          return client.replyMessage(event.replyToken,{ type:'text', text:'❌ วันอาทิตย์ไม่ต้อง check-in' });
 
-        employees[empId] = {
-          name: empName.join(' ') || 'Employee',
-          active: true,
-        };
-
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: `✅ เพิ่ม employee สำเร็จ\n${employees[empId].name}`,
-        });
-        continue;
-      }
-
-      /* ===== ADMIN: remove employee ===== */
-      if (lower.startsWith('remove employee')) {
-        if (!isAdmin) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '❌ คำสั่งนี้สำหรับ admin เท่านั้น',
-          });
-          continue;
-        }
-
-        const [, , empId] = text.split(' ');
-        if (!employees[empId]) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '⚠️ ไม่พบ employee นี้ในระบบ',
-          });
-          continue;
-        }
-
-        employees[empId].active = false;
-
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: `⛔ ปิดสถานะ employee แล้ว`,
-        });
-        continue;
-      }
-
-      /* ===== checkin ===== */
-      if (lower === 'checkin') {
-        if (!isAdmin && !employees[userId]?.active) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '❌ คุณยังไม่ได้เป็น employee ในระบบ',
-          });
-          continue;
-        }
-
-        if (isSunday()) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '❌ วันอาทิตย์ไม่ต้อง check-in ค่ะ',
-          });
-          continue;
-        }
-
-        if (isAfter0930() && !isAdmin) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '⛔ ระบบปิด check-in แล้ว (หลัง 09:30)',
-          });
-          continue;
-        }
+        if (isAfter0930() && !isAdmin)
+          return client.replyMessage(event.replyToken,{ type:'text', text:'⛔ ระบบปิดแล้ว' });
 
         await client.replyMessage(event.replyToken, {
           type: 'template',
           altText: 'เลือกประเภทงาน',
           template: {
             type: 'buttons',
-            text: `${thaiDate}\n${name} วันนี้คุณทำงานแบบไหนคะ`,
+            text: `${formatThaiDate()}\n${name}`,
             actions: [
-              { label: 'ทำงานเต็มวัน', type: 'message', text: 'work:full' },
+              { label: 'เต็มวัน', type: 'message', text: 'work:full' },
               { label: 'ครึ่งวันเช้า', type: 'message', text: 'work:half-morning' },
               { label: 'ครึ่งวันบ่าย', type: 'message', text: 'work:half-afternoon' },
-              { label: 'หยุดงาน', type: 'message', text: 'work:off' },
+              { label: 'หยุด', type: 'message', text: 'work:off' },
             ],
           },
         });
         continue;
       }
 
-      /* ===== work result ===== */
-      if (lower.startsWith('work:')) {
-        if (!isAdmin && !employees[userId]?.active) {
-          await client.replyMessage(event.replyToken, {
-            type: 'text',
-            text: '❌ คุณไม่มีสิทธิ์ check-in',
-          });
-          continue;
-        }
-
+      if (text.startsWith('work:')) {
         try {
-          checkinStore[userId] = { date: today, workType: lower };
-
           await saveCheckinToSheet({
-            date: today,
+            date: getToday(),
             userId,
             name,
-            workType: lower,
+            workType: text,
           });
 
           await client.replyMessage(event.replyToken, {
             type: 'text',
-            text: `✅ บันทึกเรียบร้อย\n${thaiDate}\n${name}`,
+            text: `✅ บันทึกสำเร็จ\n${name}`,
           });
-
         } catch (err) {
-          console.error('CHECKIN SAVE ERROR:', err);
-
           await client.replyMessage(event.replyToken, {
             type: 'text',
-            text: '⚠️ บันทึกไม่สำเร็จ (Google Sheet)\nกรุณาแจ้งแอดมิน',
+            text: `⚠️ บันทึกไม่สำเร็จ (Google Sheet)\n${err.response?.data?.error?.message || err.message}`,
           });
         }
-
-        continue;
       }
     }
 
     res.sendStatus(200);
   } catch (e) {
-    console.error('WEBHOOK ERROR:', e);
+    console.error('WEBHOOK ERROR', e);
     res.sendStatus(500);
   }
 });
