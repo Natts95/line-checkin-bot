@@ -466,6 +466,44 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           continue;
       }
 
+      // Admin: เพิ่มหนี้ (ปล่อยกู้เพิ่ม)
+      // พิมพ์: เพิ่มหนี้ U1234xxx 5000
+      if (lower.startsWith('เพิ่มหนี้')) {
+          if(!isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ Admin Only'}); continue; }
+          
+          const parts = text.split(' ');
+          const targetId = parts[1]; // UserID
+          const amount = parseInt(parts[2]); // จำนวนเงิน
+
+          if (!targetId || !amount || isNaN(amount)) {
+              await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ รูปแบบคำสั่งผิดค่ะ\nพิมพ์: เพิ่มหนี้ [UserID] [จำนวนเงิน]\nเช่น: เพิ่มหนี้ U1234... 5000' });
+              continue;
+          }
+
+          if (!employees[targetId]) {
+              await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ ไม่พบรหัสพนักงานนี้ในระบบค่ะ' });
+              continue;
+          }
+
+          // 1. คำนวณหนี้ใหม่ (ของเดิม + ยอดใหม่)
+          const oldDebt = employees[targetId].totalDebt || 0;
+          const newDebt = oldDebt + amount;
+
+          // 2. อัปเดต Memory
+          employees[targetId].totalDebt = newDebt;
+
+          // 3. อัปเดต Google Sheet
+          await updateDebtInSheet(targetId, newDebt);
+
+          // 4. (Optional) อาจจะอยากบันทึกลง Sheet 'advance' ด้วยไหม? หรือแค่แก้หนี้เฉยๆ?
+          // ถ้าเอาแค่แก้หนี้ก้อนใหญ่ จบที่ข้อ 3 ได้เลยค่ะ
+
+          await client.replyMessage(event.replyToken, { 
+              type: 'text', 
+              text: `✅ เพิ่มหนี้ให้คุณ ${employees[targetId].name} เรียบร้อยค่ะ\n💰 ยอดเพิ่ม: ${amount.toLocaleString()} บาท\n📉 หนี้รวมปัจจุบัน: ${newDebt.toLocaleString()} บาท` 
+          });
+          continue;
+      }
 
       /* ===== 1. Check-in Logic ===== */
       if (lower.startsWith('work:')) {
