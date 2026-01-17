@@ -126,23 +126,50 @@ async function loadDataFromSheet() {
 }
 
 /* ======================
-   Helpers & Time Logic
+   Helpers & Time Logic (Fixed Timezone 🇹🇭)
 ====================== */
-function getToday() { return new Date().toISOString().split('T')[0]; }
-function isSunday() { return new Date().getDay() === 0; }
-function isAfter0930() { 
-  const d = new Date(); 
-  return d.getHours() > 9 || (d.getHours() === 9 && d.getMinutes() >= 30); 
+
+// ฟังก์ชัน: ดึงวันที่ปัจจุบัน (ยึดเวลาไทยเสมอ) -> Output: "2026-01-17"
+function getToday() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
 }
-function formatThaiDate() {
-    const d = new Date();
-    const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
-    return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()+543}`;
+
+// ฟังก์ชัน: เช็คว่าเป็นวันอาทิตย์หรือไม่ (ยึดเวลาไทย)
+function isSunday() {
+  const day = parseInt(new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok', day: 'numeric' }));
+  const dayOfWeek = new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok', weekday: 'short' });
+  // logic ของ js: Sunday = 0, แต่วิธีนี้เช็ค string เอาชัวร์กว่า
+  return dayOfWeek === 'Sun';
 }
+
+// ฟังก์ชัน: เช็คว่าหลัง 09:30 หรือไม่ (ยึดเวลาไทย)
+function isAfter0930() {
+  const now = new Date();
+  // แปลงเวลาปัจจุบันเป็นเวลาไทย แล้วดึงชั่วโมง/นาทีออกมา
+  const thaiTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
+  const hour = thaiTime.getHours();
+  const minute = thaiTime.getMinutes();
+
+  return hour > 9 || (hour === 9 && minute >= 30);
+}
+
+// ฟังก์ชัน: เช็คช่วงเวลาทำธุรกรรม 10:00 - 13:00 (ยึดเวลาไทย)
 function isTransactionTime() {
-    const d = new Date();
-    const hour = d.getHours();
-    return hour >= 10 && hour < 13; // 10:00 - 12:59
+  const now = new Date();
+  const thaiTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
+  const hour = thaiTime.getHours();
+  
+  // 10:00 - 12:59
+  return hour >= 10 && hour < 13;
+}
+
+// ฟังก์ชัน: ฟอร์แมตวันที่ไทยสวยๆ
+function formatThaiDate() {
+    const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+    const now = new Date();
+    const thaiTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }));
+    
+    return `${thaiTime.getDate()} ${months[thaiTime.getMonth()]} ${thaiTime.getFullYear()+543}`;
 }
 
 /* ======================
