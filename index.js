@@ -46,10 +46,13 @@ async function saveToSheet(range, values) {
   } catch (err) { console.error(`❌ Save Error (${range}):`, err.message); }
 }
 
+// ฟังก์ชัน: ค้นหา UserID (ตัวล่าสุด) แล้วอัปเดตหนี้
 async function updateDebtInSheet(targetUserId, newDebtAmount) {
   try {
     await auth.authorize();
     const sheets = google.sheets({ version: 'v4', auth });
+
+    // 1. อ่านข้อมูล ID ทั้งหมด
     const readRes = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.SPREADSHEET_ID,
       range: 'employee!B:B', 
@@ -58,24 +61,35 @@ async function updateDebtInSheet(targetUserId, newDebtAmount) {
     const rows = readRes.data.values;
     if (!rows || rows.length === 0) return;
 
+    // 2. วนลูปหาบรรทัด (🌟 แก้ไข: หาจากล่างขึ้นบน เพื่อเอาตัวล่าสุดเสมอ)
     let targetRow = -1;
-    for (let i = 0; i < rows.length; i++) {
+    for (let i = rows.length - 1; i >= 0; i--) { // เริ่มจากตัวสุดท้าย ถอยหลังมาตัวแรก
       if (rows[i][0] === targetUserId) {
-        targetRow = i + 1;
-        break;
+        targetRow = i + 1; // เจอแล้ว! นี่คือบรรทัดล่าสุดของคนนี้
+        break; // หยุดค้นหาทันที
       }
     }
 
-    if (targetRow === -1) return;
+    if (targetRow === -1) {
+      console.log(`❌ ไม่พบ UserID: ${targetUserId} เพื่ออัปเดตหนี้`);
+      return;
+    }
 
+    // 3. สั่งอัปเดตเฉพาะช่อง G (TotalDebt) ในบรรทัดที่เจอ
     await sheets.spreadsheets.values.update({
       spreadsheetId: process.env.SPREADSHEET_ID,
       range: `employee!G${targetRow}`, 
       valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [[newDebtAmount]] },
+      requestBody: {
+        values: [[newDebtAmount]], 
+      },
     });
-    console.log(`✅ Update Debt: Row ${targetRow}, Amount ${newDebtAmount}`);
-  } catch (err) { console.error('❌ UPDATE DEBT ERROR:', err.message); }
+
+    console.log(`✅ อัปเดตหนี้ (Latest Row): แถว ${targetRow}, ยอด ${newDebtAmount}`);
+
+  } catch (err) {
+    console.error('❌ UPDATE DEBT ERROR:', err.message);
+  }
 }
 
 async function loadDataFromSheet() {
@@ -406,16 +420,32 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
 
       /* ===== 0. Utility Commands ===== */
       
-      if (lower === 'whoami') {
+      if (lower === 'whoami' || lower === 'เช็คยอด' || lower === 'ยอดหนี้') {
         let role = 'Guest';
-        if (isSuperAdmin) role = '👑 Super Admin';
-        else if (isAdmin) role = '🛡️ Admin';
-        else if (employees[userId]?.active) role = '💼 Employee';
+        let detail = '';
+        let showId = false; // ตัวแปรควบคุมการโชว์ ID
+
+        if (isSuperAdmin) {
+            role = '👑 Super Admin';
+            showId = true; // Admin ให้เห็น ID ตัวเอง
+        } else if (isAdmin) {
+            role = '🛡️ Admin';
+            showId = true; // Admin ให้เห็น ID ตัวเอง
+        } else if (employees[userId]?.active) {
+            role = '💼 Employee';
+            const debt = employees[userId].totalDebt.toLocaleString();
+            const rate = employees[userId].dailyRate.toLocaleString();
+            detail = `\n----------------\n💰 ค่าแรงรายวัน: ${rate} บาท\n📉 หนี้คงเหลือปัจจุบัน: ${debt} บาท`;
+            showId = false; // พนักงานไม่ต้องเห็น ID
+        }
         
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: `👤 ชื่อ: ${name}\nID: ${userId}\nสถานะ: ${role}`
-        });
+        let msg = `👤 ข้อมูลผู้ใช้\nชื่อ: ${name}\nสถานะ: ${role}`;
+        if (showId) {
+            msg += `\nID: ${userId}`; // เติม ID เข้าไปเฉพาะ Admin
+        }
+        msg += detail;
+
+        await client.replyMessage(event.replyToken, { type: 'text', text: msg });
         continue;
       }
 
@@ -501,6 +531,104 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           await client.replyMessage(event.replyToken, { 
               type: 'text', 
               text: `✅ เพิ่มหนี้ให้คุณ ${employees[targetId].name} เรียบร้อยค่ะ\n💰 ยอดเพิ่ม: ${amount.toLocaleString()} บาท\n📉 หนี้รวมปัจจุบัน: ${newDebt.toLocaleString()} บาท` 
+          });
+          continue;
+      }
+
+      // Admin: เรียกดูรายชื่อพนักงานทั้งหมด
+      if (lower === 'list employees' || lower === 'รายชื่อ') {
+          if (!isAdmin) { await client.replyMessage(event.replyToken, { type: 'text', text: '❌ Admin Only' }); continue; }
+          
+          let msg = '📋 รายชื่อพนักงาน (Active)\n=================\n';
+          let count = 0;
+
+          for (const uid in employees) {
+              const emp = employees[uid];
+              if (emp.active) {
+                  count++;
+                  msg += `${count}. ${emp.name}\n`;
+                  msg += `🆔: ${uid}\n`; // โชว์ ID ให้ Admin ก๊อปไปใช้
+                  msg += `📉 หนี้: ${emp.totalDebt.toLocaleString()} บ.\n`;
+                  msg += `-----------------\n`;
+              }
+          }
+
+          if (count === 0) msg += '(ยังไม่มีพนักงานในระบบ)';
+
+          await client.replyMessage(event.replyToken, { type: 'text', text: msg });
+          continue;
+      }
+
+      /* ===== Admin: จัดการเวลาแทนพนักงาน (Manual Fix) ===== */
+
+      // 1. สั่งแก้เวลา / ลงเวลาแทน (Override)
+      // พิมพ์: แก้เวลา [UserID] [เต็ม/เช้า/บ่าย/หยุด]
+      // ตัวอย่าง: แก้เวลา U1234... เต็ม
+      if (lower.startsWith('แก้เวลา')) {
+          if (!isAdmin) { await client.replyMessage(event.replyToken, { type: 'text', text: '❌ Admin Only' }); continue; }
+
+          const parts = text.split(' ');
+          const targetId = parts[1];
+          const typeInput = parts[2]; // เต็ม, เช้า, บ่าย, หยุด
+
+          if (!targetId || !typeInput) {
+              await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ รูปแบบผิดค่ะ\nพิมพ์: แก้เวลา [UserID] [เต็ม/เช้า/บ่าย/หยุด]\n(ดู ID จากคำสั่ง "รายชื่อ")' });
+              continue;
+          }
+
+          // แปลงคำสั่งเป็น Code ระบบ
+          let finalType = '';
+          let typeTh = '';
+          if (['เต็ม', 'full', 'เต็มวัน'].includes(typeInput)) { finalType = 'work:full'; typeTh = 'เต็มวัน'; }
+          else if (['เช้า', 'morning'].includes(typeInput)) { finalType = 'work:half-morning'; typeTh = 'ครึ่งเช้า'; }
+          else if (['บ่าย', 'afternoon'].includes(typeInput)) { finalType = 'work:half-afternoon'; typeTh = 'ครึ่งบ่าย'; }
+          else if (['หยุด', 'off'].includes(typeInput)) { finalType = 'work:off'; typeTh = 'หยุดงาน'; }
+          else {
+              await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ ใส่ประเภทงานไม่ถูกค่ะ (เลือก: เต็ม/เช้า/บ่าย/หยุด)' });
+              continue;
+          }
+
+          // 1. อัปเดต Memory (ลบอันเก่าของวันนี้ออกก่อน แล้วใส่ใหม่)
+          if (!checkinStore[targetId]) checkinStore[targetId] = [];
+          
+          // กรองเอาของวันนี้ออก (ถ้ามี)
+          checkinStore[targetId] = checkinStore[targetId].filter(r => r.date !== today);
+          // ใส่ค่าใหม่เข้าไป
+          checkinStore[targetId].push({ date: today, workType: finalType });
+
+          // 2. บันทึกลง Sheet (Append ต่อท้าย เป็น Log การแก้ไข)
+          // (หมายเหตุ: ใน Sheet จะมี 2 แถว แต่ใน Memory จะจำอันล่าสุด ซึ่งถูกต้องแล้ว)
+          const targetName = employees[targetId]?.name || 'Unknown';
+          await saveToSheet('checkin!A:E', [today, targetId, targetName, finalType, new Date().toLocaleString('th-TH') + ' (Admin แก้ไข)']);
+
+          await client.replyMessage(event.replyToken, { 
+              type: 'text', 
+              text: `✅ แก้ไขเวลาให้คุณ ${targetName} เรียบร้อยค่ะ\n📅 วันที่: ${thaiDate}\n📝 สถานะใหม่: ${typeTh}` 
+          });
+          continue;
+      }
+
+      // 2. สั่งลบเวลาออก (Reset ของวันนี้)
+      // พิมพ์: ลบเวลา [UserID]
+      if (lower.startsWith('ลบเวลา')) {
+          if (!isAdmin) { await client.replyMessage(event.replyToken, { type: 'text', text: '❌ Admin Only' }); continue; }
+
+          const targetId = text.split(' ')[1];
+          if (!targetId) { await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ ใส่ UserID ด้วยค่ะ' }); continue; }
+
+          if (checkinStore[targetId]) {
+              // ลบ record ของวันนี้ออกจาก Memory
+              checkinStore[targetId] = checkinStore[targetId].filter(r => r.date !== today);
+          }
+          
+          const targetName = employees[targetId]?.name || 'Unknown';
+
+          // (Optional) บันทึก Log ว่าถูกลบ
+          await saveToSheet('checkin!A:E', [today, targetId, targetName, 'delete-log', new Date().toLocaleString('th-TH') + ' (Admin สั่งลบ)']);
+
+          await client.replyMessage(event.replyToken, { 
+              type: 'text', 
+              text: `✅ ลบการลงเวลาของวันนี้ให้คุณ ${targetName} แล้วค่ะ\n(พนักงานสามารถกด Check-in ใหม่ได้เลย)` 
           });
           continue;
       }
