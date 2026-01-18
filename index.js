@@ -92,6 +92,52 @@ async function updateDebtInSheet(targetUserId, newDebtAmount) {
   }
 }
 
+// ฟังก์ชัน: อัปเดตค่าแรง (DailyRate) ใน Google Sheet (Column F)
+async function updateRateInSheet(targetUserId, newRate) {
+  try {
+    await auth.authorize();
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    // 1. อ่านข้อมูล ID ทั้งหมด
+    const readRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: 'employee!B:B', 
+    });
+
+    const rows = readRes.data.values;
+    if (!rows || rows.length === 0) return;
+
+    // 2. วนลูปหาบรรทัด (หาจากล่างขึ้นบน เพื่อเอาตัวล่าสุด)
+    let targetRow = -1;
+    for (let i = rows.length - 1; i >= 0; i--) { 
+      if (rows[i][0] === targetUserId) {
+        targetRow = i + 1; 
+        break; 
+      }
+    }
+
+    if (targetRow === -1) {
+      console.log(`❌ ไม่พบ UserID: ${targetUserId} เพื่ออัปเดตค่าแรง`);
+      return;
+    }
+
+    // 3. สั่งอัปเดตช่อง F (DailyRate)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `employee!F${targetRow}`, 
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[newRate]], 
+      },
+    });
+
+    console.log(`✅ อัปเดตค่าแรง: แถว ${targetRow}, ยอด ${newRate}`);
+
+  } catch (err) {
+    console.error('❌ UPDATE RATE ERROR:', err.message);
+  }
+}
+
 async function loadDataFromSheet() {
   console.log('🔄 Loading data...');
   try {
@@ -512,6 +558,7 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
             `🔸 ลาป่วย/หยุด -> พิมพ์: แก้เวลา [ID] หยุด\n\n` +
 
             `💰 3. จัดการเงิน\n` +
+            `🔹 ปรับค่าแรง: ปรับค่าแรง [ID] [ยอดใหม่]\n` +
             `🔹 ปล่อยกู้เพิ่ม: เพิ่มหนี้ [ID] [จำนวน]\n` +
             `🔹 แก้หนี้ใน Sheet: แก้เสร็จต้องพิมพ์ update data\n\n` +
 
@@ -539,15 +586,56 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
       }
 
       // Admin Management
+      // Admin: เพิ่มพนักงานใหม่ (รองรับการใส่ค่าแรงเลย)
+      // รูปแบบ 1: add employee [ID] [ชื่อ] (ค่าแรงเป็น 0)
+      // รูปแบบ 2: add employee [ID] [ชื่อ] [ค่าแรง]
+      // ตัวอย่าง: add employee U123... สมชาย 500
       if (lower.startsWith('add employee')) {
           if(!isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ Admin Only'}); continue; }
-          const [,,eid, ...n] = text.split(' ');
-          const ename = n.join(' ')||'Emp';
-          if(!eid) continue;
           
-          employees[eid] = { name: ename, active: true, dailyRate: 0, totalDebt: 0 };
-          await saveToSheet('employee!A:G', [new Date().toLocaleString('th-TH'), eid, ename, 'active', userId, 0, 0]);
-          await client.replyMessage(event.replyToken, {type:'text', text:`✅ เพิ่มพนักงาน: ${ename} เรียบร้อยค่ะ\n(อย่าลืมไปใส่ค่าแรง/หนี้ใน Sheet และกด update data นะคะ)`});
+          const parts = text.split(' ');
+          // parts[0]=add, parts[1]=employee, parts[2]=ID
+          const eid = parts[2];
+          
+          if(!eid) {
+              await client.replyMessage(event.replyToken, {type:'text', text:'⚠️ ใส่ UserID ด้วยค่ะ'}); 
+              continue;
+          }
+
+          // --- Logic แยกชื่อกับค่าแรง ---
+          let rate = 0;
+          let nameParts = [];
+          
+          // เช็คว่าคำสุดท้ายเป็นตัวเลขไหม?
+          const lastPart = parts[parts.length - 1];
+          const possibleRate = parseInt(lastPart);
+
+          if (!isNaN(possibleRate) && parts.length > 3) {
+              // ถ้าคำสุดท้ายเป็นเลข และมีชื่อนำหน้ามา
+              rate = possibleRate; // เอาเลขนั้นเป็นค่าแรง
+              nameParts = parts.slice(3, parts.length - 1); // เอาคำตรงกลางเป็นชื่อ
+          } else {
+              // ถ้าไม่มีเลข
+              nameParts = parts.slice(3); // เอาข้างหลัง ID ทั้งหมดเป็นชื่อ
+          }
+
+          const ename = nameParts.join(' ') || 'Emp';
+          // ----------------------------
+
+          // 1. บันทึก Memory
+          employees[eid] = { name: ename, active: true, dailyRate: rate, totalDebt: 0 };
+          
+          // 2. บันทึก Google Sheet (Column F คือค่าแรง, G คือหนี้เริ่มเป็น 0)
+          await saveToSheet('employee!A:G', [new Date().toLocaleString('th-TH'), eid, ename, 'active', userId, rate, 0]);
+          
+          let replyMsg = `✅ เพิ่มพนักงาน: "${ename}" เรียบร้อยค่ะ`;
+          if (rate > 0) {
+              replyMsg += `\n💰 ค่าแรงเริ่มต้น: ${rate} บาท/วัน`;
+          } else {
+              replyMsg += `\n(ยังไม่ได้ระบุค่าแรง - สามารถใช้คำสั่ง "ปรับค่าแรง" ทีหลังได้ค่ะ)`;
+          }
+
+          await client.replyMessage(event.replyToken, {type:'text', text: replyMsg});
           continue;
       }
       
@@ -609,6 +697,39 @@ app.post('/webhook', line.middleware(config), async (req, res) => {
           await client.replyMessage(event.replyToken, { 
               type: 'text', 
               text: `✅ เพิ่มหนี้ให้คุณ ${employees[targetId].name} เรียบร้อยค่ะ\n💰 ยอดเพิ่ม: ${amount.toLocaleString()} บาท\n📉 หนี้รวมปัจจุบัน: ${newDebt.toLocaleString()} บาท` 
+          });
+          continue;
+      }
+
+      // Admin: ปรับค่าแรง (ขึ้นเงินเดือน)
+      // พิมพ์: ปรับค่าแรง [UserID] [ยอดใหม่]
+      // ตัวอย่าง: ปรับค่าแรง U123... 600
+      if (lower.startsWith('ปรับค่าแรง') || lower.startsWith('set rate')) {
+          if(!isAdmin) { await client.replyMessage(event.replyToken, {type:'text', text:'❌ Admin Only'}); continue; }
+          
+          const parts = text.split(' ');
+          const targetId = parts[1]; 
+          const amount = parseInt(parts[2]); 
+
+          if (!targetId || !amount || isNaN(amount)) {
+              await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ รูปแบบผิดค่ะ\nพิมพ์: ปรับค่าแรง [UserID] [ยอดใหม่]\nเช่น: ปรับค่าแรง U123... 600' });
+              continue;
+          }
+
+          if (!employees[targetId]) {
+              await client.replyMessage(event.replyToken, { type: 'text', text: '⚠️ ไม่พบรหัสพนักงานนี้ในระบบค่ะ' });
+              continue;
+          }
+
+          // 1. อัปเดต Memory
+          employees[targetId].dailyRate = amount;
+
+          // 2. อัปเดต Google Sheet (Column F)
+          await updateRateInSheet(targetId, amount);
+
+          await client.replyMessage(event.replyToken, { 
+              type: 'text', 
+              text: `✅ ปรับค่าแรงให้คุณ ${employees[targetId].name} เรียบร้อยค่ะ\n💰 ค่าแรงใหม่: ${amount.toLocaleString()} บาท/วัน` 
           });
           continue;
       }
